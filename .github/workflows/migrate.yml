@@ -14,19 +14,19 @@ jobs:
       uses: azure/login@v2
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
+        enable-AzPSSession: true
 
     - name: Install Az PowerShell
       shell: pwsh
       run: |
         Install-Module Az -Force -AllowClobber
 
-    - name: Validate Login
+    - name: Validate Azure Context
       shell: pwsh
       run: |
         Get-AzContext
 
-    # 🔥 THIS IS THE MISSING PART
-    - name: Run Migration Script
+    - name: Run VM Migration Script
       shell: pwsh
       run: |
         ./scripts/migrate.ps1
