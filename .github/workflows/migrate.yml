@@ -1,4 +1,4 @@
-name: Azure VM Migration
+name: Azure VM Subscription Migration
 
 on:
   workflow_dispatch:
@@ -13,15 +13,14 @@ jobs:
     - name: Azure Login
       uses: azure/login@v2
       with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.SUBSCRIPTION_A }}
-        client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: Install Az PowerShell
       shell: pwsh
-      run: Install-Module Az -Force -AllowClobber
+      run: |
+        Install-Module Az -Force -AllowClobber
 
-    - name: Run Migration
+    - name: Validate Login
       shell: pwsh
-      run: ./scripts/migrate.ps1
+      run: |
+        Get-AzContext
