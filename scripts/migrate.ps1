@@ -1,5 +1,5 @@
-$RG = "rg-prod"
-$VM = "prod-vm01"
+$RG = "Dev-RG"
+$VM = "ubuntuserver"
 
 $vm = Get-AzVM -Name $VM -ResourceGroupName $RG
 Write-Host "VM found:" $vm.Name
