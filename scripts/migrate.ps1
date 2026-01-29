@@ -1,58 +1,69 @@
-# -----------------------------
-# SET SUBSCRIPTION CONTEXT
-# -----------------------------
-$subscriptionId = (Get-AzContext).Subscription.Id
+# ================================
+# USER INPUT
+# ================================
+$ResourceGroupName = "Dev-RG"
+$VMName            = "ubuntuServer"
 
-if (-not $subscriptionId) {
-    Write-Host "No Az context found. Setting subscription manually..."
-    $subscriptionId = "<SUBSCRIPTION_A_ID>"
+# ================================
+Write-Host "======================================="
+Write-Host " Azure VM Subscription Migration Script "
+Write-Host "======================================="
+
+# ================================
+# VERIFY CONTEXT
+# ================================
+$context = Get-AzContext
+
+if (-not $context.Subscription) {
+    throw "Azure subscription context not found."
 }
 
-Set-AzContext -SubscriptionId $subscriptionId
+Write-Host "Using subscription:" $context.Subscription.Name
 
-$RG = "Dev-RG"
-$VM = "ubuntuServer"
+# ================================
+# GET VM
+# ================================
+$vm = Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroupName
+Write-Host "VM found:" $vm.Name
 
-Write-Host "=============================="
-Write-Host "Starting VM migration process"
-Write-Host "=============================="
-
-$vm = Get-AzVM -Name $VM -ResourceGroupName $RG
-Write-Host "VM found: $($vm.Name)"
-
-# -----------------------------
-# STOP VM (VERY IMPORTANT)
-# -----------------------------
+# ================================
+# STOP VM (required)
+# ================================
 Write-Host "Stopping VM..."
-Stop-AzVM -Name $VM -ResourceGroupName $RG -Force -NoWait
-
-Write-Host "Waiting for VM deallocation..."
+Stop-AzVM -Name $VMName -ResourceGroupName $ResourceGroupName -Force
 
 do {
     Start-Sleep -Seconds 10
-    $status = (Get-AzVM -Name $VM -ResourceGroupName $RG -Status).Statuses |
-              Where-Object Code -like "PowerState/*"
-    Write-Host "Current VM state:" $status.DisplayStatus
+    $state = (Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroupName -Status).Statuses |
+        Where-Object Code -like "PowerState/*"
+    Write-Host "VM state:" $state.DisplayStatus
 }
-while ($status.DisplayStatus -ne "VM deallocated")
+while ($state.DisplayStatus -ne "VM deallocated")
 
-Write-Host "VM deallocated successfully"
+Write-Host "VM deallocated successfully."
 
-# -----------------------------
-# GET NIC & PUBLIC IP
-# -----------------------------
+# ================================
+# GET NIC + PUBLIC IP
+# ================================
 $nicId = $vm.NetworkProfile.NetworkInterfaces[0].Id
-$nic = Get-AzNetworkInterface -ResourceId $nicId
+$nic   = Get-AzNetworkInterface -ResourceId $nicId
 
 $ipConfigName = $nic.IpConfigurations[0].Name
-$pipId = $nic.IpConfigurations[0].PublicIpAddress.Id
+$pip = $nic.IpConfigurations[0].PublicIpAddress
+
+if (-not $pip) {
+    Write-Host "No Public IP attached. Skipping detach."
+    exit 0
+}
+
+$pipId   = $pip.Id
 $pipName = ($pipId -split "/")[-1]
 
-Write-Host "Public IP detected: $pipName"
+Write-Host "Public IP detected:" $pipName
 
-# -----------------------------
+# ================================
 # DETACH PUBLIC IP
-# -----------------------------
+# ================================
 Write-Host "Detaching public IP..."
 
 Set-AzNetworkInterfaceIpConfig `
@@ -62,16 +73,18 @@ Set-AzNetworkInterfaceIpConfig `
 
 Set-AzNetworkInterface -NetworkInterface $nic
 
-Write-Host "✅ Public IP detached"
+# ================================
+# VERIFY
+# ================================
+$nicCheck = Get-AzNetworkInterface -ResourceId $nicId
 
-# -----------------------------
-# VERIFY DETACH
-# -----------------------------
-$nicVerify = Get-AzNetworkInterface -ResourceId $nicId
-
-if ($null -eq $nicVerify.IpConfigurations[0].PublicIpAddress) {
-    Write-Host "✅ Verification passed: PIP is detached"
+if ($null -eq $nicCheck.IpConfigurations[0].PublicIpAddress) {
+    Write-Host "✅ Public IP detached successfully."
 }
 else {
-    throw "❌ Public IP is still attached"
+    throw "❌ Public IP detach failed."
 }
+
+Write-Host "======================================="
+Write-Host " STEP 1 COMPLETED SUCCESSFULLY "
+Write-Host "======================================="
