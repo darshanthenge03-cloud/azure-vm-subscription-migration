@@ -1,3 +1,15 @@
+# -----------------------------
+# SET SUBSCRIPTION CONTEXT
+# -----------------------------
+$subscriptionId = (Get-AzContext).Subscription.Id
+
+if (-not $subscriptionId) {
+    Write-Host "No Az context found. Setting subscription manually..."
+    $subscriptionId = "<SUBSCRIPTION_A_ID>"
+}
+
+Set-AzContext -SubscriptionId $subscriptionId
+
 $RG = "Dev-RG"
 $VM = "ubuntuServer"
 
