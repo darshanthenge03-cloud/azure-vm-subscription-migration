@@ -24,3 +24,9 @@ jobs:
       shell: pwsh
       run: |
         Get-AzContext
+
+    # 🔥 THIS IS THE MISSING PART
+    - name: Run Migration Script
+      shell: pwsh
+      run: |
+        ./scripts/migrate.ps1
