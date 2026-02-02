@@ -1,8 +1,16 @@
+$ErrorActionPreference = "Stop"
+
 # ================================
 # USER INPUT
 # ================================
-$ResourceGroupName = "Dev-RG"
-$VMName            = "ubuntuServer"
+$SourceSubscriptionId      = "46689057-be43-4229-9241-e0591dad4dbf"
+$DestinationSubscriptionId = "d4e068bf-2473-4201-b10a-7f8501d50ebc"
+
+$SourceResourceGroup       = "Dev-RG"
+$DestinationResourceGroup  = "Dev-RG"
+$DestinationLocation       = "Central India"
+
+$VMName = "ubuntuServer"
 
 # ================================
 Write-Host "======================================="
@@ -12,79 +20,162 @@ Write-Host "======================================="
 # ================================
 # VERIFY CONTEXT
 # ================================
-$context = Get-AzContext
-
-if (-not $context.Subscription) {
-    throw "Azure subscription context not found."
+if (-not (Get-AzContext).Subscription) {
+    throw "Azure login missing."
 }
 
-Write-Host "Using subscription:" $context.Subscription.Name
+# ================================
+# SOURCE CONTEXT
+# ================================
+Set-AzContext -SubscriptionId $SourceSubscriptionId
+Write-Host "Source subscription set."
 
 # ================================
 # GET VM
 # ================================
-$vm = Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroupName
+$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup
 Write-Host "VM found:" $vm.Name
 
 # ================================
-# STOP VM (required)
+# STOP & DEALLOCATE VM
 # ================================
-Write-Host "Stopping VM..."
-Stop-AzVM -Name $VMName -ResourceGroupName $ResourceGroupName -Force
+Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
 do {
-    Start-Sleep -Seconds 10
-    $state = (Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroupName -Status).Statuses |
+    Start-Sleep 10
+    $state = (Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Status).Statuses |
         Where-Object Code -like "PowerState/*"
     Write-Host "VM state:" $state.DisplayStatus
 }
 while ($state.DisplayStatus -ne "VM deallocated")
 
-Write-Host "VM deallocated successfully."
-
 # ================================
-# GET NIC + PUBLIC IP
+# BACKUP CLEANUP
 # ================================
-$nicId = $vm.NetworkProfile.NetworkInterfaces[0].Id
-$nic   = Get-AzNetworkInterface -ResourceId $nicId
+$vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
 
-$ipConfigName = $nic.IpConfigurations[0].Name
-$pip = $nic.IpConfigurations[0].PublicIpAddress
+foreach ($vault in $vaults) {
+    Set-AzRecoveryServicesVaultContext -Vault $vault
 
-if (-not $pip) {
-    Write-Host "No Public IP attached. Skipping detach."
-    exit 0
+    $backupItem = Get-AzRecoveryServicesBackupItem `
+        -WorkloadType AzureVM `
+        -BackupManagementType AzureVM `
+        -ErrorAction SilentlyContinue |
+        Where-Object FriendlyName -eq $VMName
+
+    if ($backupItem) {
+        Disable-AzRecoveryServicesBackupProtection `
+            -Item $backupItem `
+            -RemoveRecoveryPoints `
+            -Force
+
+        Set-AzRecoveryServicesVaultProperty `
+            -Vault $vault `
+            -SoftDeleteFeatureState Disable
+    }
 }
 
-$pipId   = $pip.Id
-$pipName = ($pipId -split "/")[-1]
-
-Write-Host "Public IP detected:" $pipName
-
 # ================================
-# DETACH PUBLIC IP
+# DEPENDENCIES + PIP TRACKING
 # ================================
-Write-Host "Detaching public IP..."
+$resourceIds = @()
+$resourceIds += $vm.Id
+$resourceIds += $vm.StorageProfile.OsDisk.ManagedDisk.Id
 
-Set-AzNetworkInterfaceIpConfig `
-    -NetworkInterface $nic `
-    -Name $ipConfigName `
-    -PublicIpAddress $null
-
-Set-AzNetworkInterface -NetworkInterface $nic
-
-# ================================
-# VERIFY
-# ================================
-$nicCheck = Get-AzNetworkInterface -ResourceId $nicId
-
-if ($null -eq $nicCheck.IpConfigurations[0].PublicIpAddress) {
-    Write-Host "✅ Public IP detached successfully."
+foreach ($disk in $vm.StorageProfile.DataDisks) {
+    $resourceIds += $disk.ManagedDisk.Id
 }
-else {
-    throw "❌ Public IP detach failed."
+
+$NicPipMap = @{}
+
+foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
+
+    $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
+    $resourceIds += $nic.Id
+
+    foreach ($ipConfig in $nic.IpConfigurations) {
+        if ($ipConfig.PublicIpAddress) {
+
+            $pipId = $ipConfig.PublicIpAddress.Id
+            $pipName = ($pipId -split "/")[-1]
+
+            Write-Host "Detaching Public IP:" $pipName
+
+            $NicPipMap[$nic.Name] = @{
+                IpConfigName = $ipConfig.Name
+                PipName      = $pipName
+            }
+
+            Set-AzNetworkInterfaceIpConfig `
+                -NetworkInterface $nic `
+                -Name $ipConfig.Name `
+                -PublicIpAddress $null
+
+            Set-AzNetworkInterface -NetworkInterface $nic
+        }
+    }
 }
+
+# ================================
+# DESTINATION CONTEXT + RG CREATE
+# ================================
+Set-AzContext -SubscriptionId $DestinationSubscriptionId
+
+if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
+    New-AzResourceGroup `
+        -Name $DestinationResourceGroup `
+        -Location $DestinationLocation
+}
+
+# ================================
+# PRE-MOVE VALIDATION
+# ================================
+Test-AzResourceMove `
+    -ResourceId $resourceIds `
+    -DestinationSubscriptionId $DestinationSubscriptionId `
+    -DestinationResourceGroupName $DestinationResourceGroup
+
+# ================================
+# MOVE RESOURCES
+# ================================
+Move-AzResource `
+    -ResourceId $resourceIds `
+    -DestinationSubscriptionId $DestinationSubscriptionId `
+    -DestinationResourceGroupName $DestinationResourceGroup `
+    -Force
+
+# ================================
+# RE-ATTACH SAME PUBLIC IP
+# ================================
+foreach ($nicName in $NicPipMap.Keys) {
+
+    $pipName = $NicPipMap[$nicName].PipName
+    $ipConfigName = $NicPipMap[$nicName].IpConfigName
+
+    $nic = Get-AzNetworkInterface `
+        -Name $nicName `
+        -ResourceGroupName $DestinationResourceGroup
+
+    $pip = Get-AzPublicIpAddress `
+        -Name $pipName `
+        -ResourceGroupName $DestinationResourceGroup
+
+    Write-Host "Re-attaching Public IP:" $pipName
+
+    Set-AzNetworkInterfaceIpConfig `
+        -NetworkInterface $nic `
+        -Name $ipConfigName `
+        -PublicIpAddress $pip
+
+    Set-AzNetworkInterface -NetworkInterface $nic
+}
+
+# ================================
+# FINAL VALIDATION
+# ================================
+$vmCheck = Get-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
+Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
 
 Write-Host "======================================="
-Write-Host " STEP 1 COMPLETED SUCCESSFULLY "
+Write-Host " MIGRATION + PUBLIC IP REATTACH DONE "
 Write-Host "======================================="
