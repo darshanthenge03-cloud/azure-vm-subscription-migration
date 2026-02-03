@@ -1,130 +1,62 @@
 $ErrorActionPreference = "Stop"
-Import-Module Az.Resources -Force
 
 # ================================
-# USER INPUT
+# INPUT
 # ================================
-$SourceSubscriptionId      = "46689057-be43-4229-9241-e0591dad4dbf"
-$DestinationSubscriptionId = "d4e068bf-2473-4201-b10a-7f8501d50ebc"
-
-$SourceResourceGroup       = "Dev-RG"
-$DestinationResourceGroup  = "Dev-RG"
-$DestinationLocation       = "Central India"
-
-$VMName = "ubuntuServer"
+$SubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
+$ResourceGroup  = "Dev-RG"
+$VMName         = "ubuntuServer"
 
 # ================================
 Write-Host "======================================="
-Write-Host " Azure VM Subscription Migration Script "
+Write-Host " PHASE 1: IP DETACH + BACKUP CLEANUP "
 Write-Host "======================================="
 
 # ================================
-# VERIFY CONTEXT
+# CONTEXT
 # ================================
-if (-not (Get-AzContext).Subscription) {
-    throw "Azure login missing."
-}
-
-# ================================
-# SOURCE CONTEXT
-# ================================
-Set-AzContext -SubscriptionId $SourceSubscriptionId
-Write-Host "Source subscription set."
+Set-AzContext -SubscriptionId $SubscriptionId
+Write-Host "Subscription context set."
 
 # ================================
 # GET VM
 # ================================
-$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup
+$vm = Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroup
 Write-Host "VM found:" $vm.Name
 
 # ================================
 # STOP & DEALLOCATE VM
 # ================================
-Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
+Write-Host "Stopping VM..."
+Stop-AzVM -Name $VMName -ResourceGroupName $ResourceGroup -Force
 
 do {
     Start-Sleep 10
-    $state = (Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Status).Statuses |
+    $state = (Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroup -Status).Statuses |
         Where-Object Code -like "PowerState/*"
     Write-Host "VM state:" $state.DisplayStatus
 }
 while ($state.DisplayStatus -ne "VM deallocated")
 
-# ================================
-# BACKUP CLEANUP
-# ================================
-Write-Host "Checking Azure Backup..."
-
-$vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
-
-foreach ($vault in $vaults) {
-
-    Write-Host "Checking vault:" $vault.Name
-    Set-AzRecoveryServicesVaultContext -Vault $vault
-
-    $containers = Get-AzRecoveryServicesBackupContainer `
-        -ContainerType AzureVM `
-        -Status Registered `
-        -ErrorAction SilentlyContinue
-
-    foreach ($container in $containers) {
-
-        $backupItem = Get-AzRecoveryServicesBackupItem `
-            -Container $container `
-            -WorkloadType AzureVM `
-            -ErrorAction SilentlyContinue |
-            Where-Object { $_.FriendlyName -eq $VMName }
-
-        if ($backupItem) {
-            Write-Host "Backup FOUND for VM:" $VMName
-
-            Disable-AzRecoveryServicesBackupProtection `
-                -Item $backupItem `
-                -RemoveRecoveryPoints `
-                -Force
-
-            Write-Host "Backup protection disabled."
-
-            Write-Host "Disabling soft delete..."
-            Set-AzRecoveryServicesVaultProperty `
-                -Vault $vault `
-                -SoftDeleteFeatureState Disable
-
-            Write-Host "Soft delete disabled."
-        }
-    }
-}
+Write-Host "VM deallocated."
 
 # ================================
-# DEPENDENCIES + PIP TRACKING
+# DISASSOCIATE PUBLIC IP
 # ================================
-$resourceIds = @()
-$resourceIds += $vm.Id
-$resourceIds += $vm.StorageProfile.OsDisk.ManagedDisk.Id
-
-foreach ($disk in $vm.StorageProfile.DataDisks) {
-    $resourceIds += $disk.ManagedDisk.Id
-}
-
-$NicPipMap = @{}
+Write-Host "Checking NICs for Public IP..."
 
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
-    $resourceIds += $nic.Id
 
     foreach ($ipConfig in $nic.IpConfigurations) {
+
         if ($ipConfig.PublicIpAddress) {
 
-            $pipId = $ipConfig.PublicIpAddress.Id
+            $pipId   = $ipConfig.PublicIpAddress.Id
             $pipName = ($pipId -split "/")[-1]
 
             Write-Host "Detaching Public IP:" $pipName
-
-            $NicPipMap[$nic.Name] = @{
-                IpConfigName = $ipConfig.Name
-                PipName      = $pipName
-            }
 
             Set-AzNetworkInterfaceIpConfig `
                 -NetworkInterface $nic `
@@ -132,70 +64,82 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
                 -PublicIpAddress $null
 
             Set-AzNetworkInterface -NetworkInterface $nic
+
+            Write-Host "Public IP detached successfully."
         }
     }
 }
 
 # ================================
-# DESTINATION CONTEXT + RG CREATE
+# BACKUP STATUS CHECK (AUTHORITATIVE)
 # ================================
-Set-AzContext -SubscriptionId $DestinationSubscriptionId
+Write-Host "Checking Azure Backup status..."
 
-if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
-    New-AzResourceGroup `
-        -Name $DestinationResourceGroup `
-        -Location $DestinationLocation
+$backupStatus = Get-AzRecoveryServicesBackupStatus `
+    -ResourceId $vm.Id `
+    -Type AzureVM
+
+if (-not $backupStatus.BackedUp) {
+    Write-Host "VM is NOT backed up. Skipping backup cleanup."
+    return
+}
+
+Write-Host "VM IS backed up."
+Write-Host "Vault Name :" $backupStatus.VaultName
+Write-Host "Vault RG   :" $backupStatus.VaultResourceGroup
+
+# ================================
+# GET VAULT (EXACT)
+# ================================
+$vault = Get-AzRecoveryServicesVault `
+    -Name $backupStatus.VaultName `
+    -ResourceGroupName $backupStatus.VaultResourceGroup
+
+Set-AzRecoveryServicesVaultContext -Vault $vault
+
+# ================================
+# GET BACKUP CONTAINER
+# ================================
+$container = Get-AzRecoveryServicesBackupContainer `
+    -ContainerType AzureVM `
+    -ErrorAction Stop |
+    Where-Object { $_.FriendlyName -eq $VMName }
+
+if (-not $container) {
+    throw "Backup container not found for VM."
 }
 
 # ================================
-# PRE-MOVE VALIDATION
+# GET BACKUP ITEM
 # ================================
-Test-AzResourceMove `
-    -ResourceId $resourceIds `
-    -DestinationSubscriptionId $DestinationSubscriptionId `
-    -DestinationResourceGroupName $DestinationResourceGroup
+$backupItem = Get-AzRecoveryServicesBackupItem `
+    -Container $container `
+    -WorkloadType AzureVM `
+    -ErrorAction Stop
 
 # ================================
-# MOVE RESOURCES
+# DISABLE BACKUP
 # ================================
-Move-AzResource `
-    -ResourceId $resourceIds `
-    -DestinationSubscriptionId $DestinationSubscriptionId `
-    -DestinationResourceGroupName $DestinationResourceGroup `
+Write-Host "Disabling backup protection..."
+
+Disable-AzRecoveryServicesBackupProtection `
+    -Item $backupItem `
+    -RemoveRecoveryPoints `
     -Force
 
-# ================================
-# RE-ATTACH SAME PUBLIC IP
-# ================================
-foreach ($nicName in $NicPipMap.Keys) {
-
-    $pipName = $NicPipMap[$nicName].PipName
-    $ipConfigName = $NicPipMap[$nicName].IpConfigName
-
-    $nic = Get-AzNetworkInterface `
-        -Name $nicName `
-        -ResourceGroupName $DestinationResourceGroup
-
-    $pip = Get-AzPublicIpAddress `
-        -Name $pipName `
-        -ResourceGroupName $DestinationResourceGroup
-
-    Write-Host "Re-attaching Public IP:" $pipName
-
-    Set-AzNetworkInterfaceIpConfig `
-        -NetworkInterface $nic `
-        -Name $ipConfigName `
-        -PublicIpAddress $pip
-
-    Set-AzNetworkInterface -NetworkInterface $nic
-}
+Write-Host "Backup protection disabled."
 
 # ================================
-# FINAL VALIDATION
+# DISABLE SOFT DELETE
 # ================================
-$vmCheck = Get-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
-Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
+Write-Host "Disabling Soft Delete..."
+
+Set-AzRecoveryServicesVaultProperty `
+    -Vault $vault `
+    -SoftDeleteFeatureState Disable
+
+Write-Host "Soft Delete disabled."
 
 Write-Host "======================================="
-Write-Host " MIGRATION + PUBLIC IP REATTACH DONE "
+Write-Host " PHASE 1 COMPLETED SUCCESSFULLY "
 Write-Host "======================================="
