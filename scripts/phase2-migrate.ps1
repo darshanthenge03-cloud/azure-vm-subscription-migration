@@ -1,5 +1,10 @@
 $ErrorActionPreference = "Stop"
 
+Import-Module Az.Accounts
+Import-Module Az.Compute
+Import-Module Az.Network
+Import-Module Az.Resources
+
 # ================================
 # USER INPUT
 # ================================
@@ -17,21 +22,18 @@ Write-Host " AZURE VM SUBSCRIPTION MIGRATION (PHASE 2)"
 Write-Host "================================================="
 
 # ================================
-# SET SOURCE CONTEXT (PowerShell)
+# SOURCE CONTEXT
 # ================================
 Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
 Write-Host "[OK] Source subscription set"
 
-# ================================
-# GET VM + FULL RESOURCE IDS
-# ================================
 $vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup
-Write-Host "[OK] VM found: $($vm.Name)"
+Write-Host "[OK] VM found"
 
 $resourceIds = @()
 $NicPipMap   = @{}
 
-# VM ID
+# VM
 $resourceIds += $vm.Id
 
 # OS Disk
@@ -53,7 +55,7 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
     }
 }
 
-# Public IPs (detached in Phase 1)
+# Public IPs
 $pips = Get-AzPublicIpAddress -ResourceGroupName $SourceResourceGroup -ErrorAction SilentlyContinue
 
 foreach ($pip in $pips) {
@@ -64,69 +66,50 @@ foreach ($pip in $pips) {
     $NicPipMap[$primaryNic]["PipName"] = $pip.Name
 }
 
-Write-Host "[INFO] Resource IDs to move:"
+Write-Host "[INFO] Resources to move:"
 $resourceIds | ForEach-Object { Write-Host $_ }
 
 # ================================
-# SET AZ CLI TO SOURCE
+# DESTINATION RG CHECK
 # ================================
-Write-Host "[INFO] Setting Azure CLI to SOURCE subscription..."
-az account set --subscription $SourceSubscriptionId
+Set-AzContext -SubscriptionId $DestinationSubscriptionId | Out-Null
 
-# Confirm VM exists
-az vm show --name $VMName --resource-group $SourceResourceGroup | Out-Null
+if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
 
-# ================================
-# CREATE DESTINATION RG IF NEEDED
-# ================================
-Write-Host "[INFO] Switching CLI to DESTINATION subscription..."
-az account set --subscription $DestinationSubscriptionId
-
-$rgCheck = az group exists --name $DestinationResourceGroup
-
-if ($rgCheck -eq "false") {
     Write-Host "[ACTION] Creating destination RG..."
-    az group create --name $DestinationResourceGroup --location $DestinationLocation | Out-Null
+    New-AzResourceGroup `
+        -Name $DestinationResourceGroup `
+        -Location $DestinationLocation | Out-Null
+
     Write-Host "[OK] Destination RG created"
 }
 else {
-    Write-Host "[OK] Destination RG already exists"
+    Write-Host "[OK] Destination RG exists"
 }
 
 # ================================
 # SWITCH BACK TO SOURCE FOR MOVE
 # ================================
-az account set --subscription $SourceSubscriptionId
+Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
 
-# ================================
-# MOVE RESOURCES
-# ================================
 Write-Host "[ACTION] Moving resources..."
 
-az resource move `
-  --destination-group $DestinationResourceGroup `
-  --destination-subscription-id $DestinationSubscriptionId `
-  --ids $($resourceIds -join ' ')
+Move-AzResource `
+  -ResourceId $resourceIds `
+  -DestinationSubscriptionId $DestinationSubscriptionId `
+  -DestinationResourceGroupName $DestinationResourceGroup `
+  -Force
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Resource move failed. Stopping execution."
-    exit 1
-}
-
-Write-Host "[OK] Resource move completed"
+Write-Host "[OK] Move completed"
 
 # ================================
 # SWITCH TO DESTINATION
 # ================================
-Write-Host "[INFO] Switching to DESTINATION subscription..."
-az account set --subscription $DestinationSubscriptionId
 Set-AzContext -SubscriptionId $DestinationSubscriptionId | Out-Null
 
 # ================================
 # REATTACH PUBLIC IP
 # ================================
-Write-Host "[INFO] Reattaching Public IP..."
-
 foreach ($nicName in $NicPipMap.Keys) {
 
     $pipName      = $NicPipMap[$nicName]["PipName"]
@@ -137,7 +120,7 @@ foreach ($nicName in $NicPipMap.Keys) {
     $nic = Get-AzNetworkInterface -Name $nicName -ResourceGroupName $DestinationResourceGroup
     $pip = Get-AzPublicIpAddress -Name $pipName -ResourceGroupName $DestinationResourceGroup
 
-    Write-Host "[ACTION] Reattaching $pipName to $nicName"
+    Write-Host "[ACTION] Reattaching $pipName"
 
     Set-AzNetworkInterfaceIpConfig `
         -NetworkInterface $nic `
@@ -145,19 +128,15 @@ foreach ($nicName in $NicPipMap.Keys) {
         -PublicIpAddress $pip | Out-Null
 
     Set-AzNetworkInterface -NetworkInterface $nic | Out-Null
-
-    Write-Host "[OK] Public IP reattached"
 }
+
+Write-Host "[OK] Public IP reattached"
 
 # ================================
 # START VM
 # ================================
-Write-Host "[ACTION] Starting VM..."
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup | Out-Null
 
 Write-Host "================================================="
 Write-Host " MIGRATION COMPLETED SUCCESSFULLY"
-Write-Host " VM moved, IP reattached, VM running"
 Write-Host "================================================="
-
-exit 0
