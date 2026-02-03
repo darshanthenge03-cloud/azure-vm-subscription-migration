@@ -1,3 +1,4 @@
+Import-Module Az.Resources -Force
 $ErrorActionPreference = "Stop"
 
 # ================================
