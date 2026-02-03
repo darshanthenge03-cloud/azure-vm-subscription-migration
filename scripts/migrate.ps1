@@ -110,7 +110,7 @@ foreach ($vault in $vaults) {
 
         Write-Host "Disabling Soft Delete..."
         Set-AzRecoveryServicesVaultProperty `
-            -Vault $vault `
+            -VaultId $vault.Id `
             -SoftDeleteFeatureState Disable
 
         Write-Host "Soft Delete disabled."
