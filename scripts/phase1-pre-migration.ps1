@@ -1,51 +1,54 @@
 $ErrorActionPreference = "Stop"
 
+Import-Module Az.Accounts
+Import-Module Az.Compute
+Import-Module Az.Network
+Import-Module Az.RecoveryServices
+Import-Module Az.Resources
+
 # ================================
 # USER INPUT
 # ================================
-$SubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
-$ResourceGroup  = "Dev-RG"
-$VMName         = "ubuntuServer"
+$SourceSubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
+$SourceResourceGroup  = "Dev-RG"
+$VMName               = "ubuntuServer"
 
-# ================================
 Write-Host "================================================="
-Write-Host " AZURE VM PRE-MIGRATION CLEANUP SCRIPT (PHASE 1)"
+Write-Host " PHASE 1 - PRE MIGRATION CLEANUP"
 Write-Host "================================================="
 
 # ================================
 # SET CONTEXT
 # ================================
-Write-Host "[INFO] Setting Azure subscription context..."
-Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
-Write-Host "[OK] Subscription context set"
+Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
+Write-Host "[OK] Source subscription set"
 
 # ================================
 # GET VM
 # ================================
-Write-Host "[INFO] Fetching VM details..."
-$vm = Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroup
-Write-Host "[OK] VM found:" $vm.Name
+$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup
+Write-Host "[OK] VM found"
 
 # ================================
 # STOP & DEALLOCATE VM
 # ================================
-Write-Host "[INFO] Stopping VM..."
-Stop-AzVM -Name $VMName -ResourceGroupName $ResourceGroup -Force | Out-Null
+Write-Host "[ACTION] Stopping VM..."
+Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
 do {
     Start-Sleep 10
-    $state = (Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroup -Status).Statuses |
+    $state = (Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Status).Statuses |
         Where-Object Code -like "PowerState/*"
-    Write-Host "[WAIT] VM state:" $state.DisplayStatus
+    Write-Host "[INFO] VM State:" $state.DisplayStatus
 }
 while ($state.DisplayStatus -ne "VM deallocated")
 
-Write-Host "[OK] VM successfully deallocated"
+Write-Host "[OK] VM deallocated"
 
 # ================================
-# DETACH PUBLIC IP
+# DETACH PUBLIC IP (MANDATORY)
 # ================================
-Write-Host "[INFO] Checking NICs for Public IP association..."
+Write-Host "[ACTION] Detaching Public IP..."
 
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
@@ -56,7 +59,7 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
         if ($ipConfig.PublicIpAddress) {
 
             $pipName = ($ipConfig.PublicIpAddress.Id -split "/")[-1]
-            Write-Host "[ACTION] Detaching Public IP:" $pipName
+            Write-Host "[INFO] Detaching PIP:" $pipName
 
             Set-AzNetworkInterfaceIpConfig `
                 -NetworkInterface $nic `
@@ -71,62 +74,71 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 }
 
 # ================================
-# AZURE BACKUP CLEANUP (REAL BLOCKER)
+# REMOVE BACKUP PROTECTION
 # ================================
-Write-Host "[INFO] Searching for Azure Backup protection..."
+Write-Host "[INFO] Removing backup protection..."
 
-$vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
-$backupFound = $false
+$vaults = Get-AzRecoveryServicesVault
 
 foreach ($vault in $vaults) {
 
-    Write-Host "[INFO] Checking vault:" $vault.Name
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
-    $containers = Get-AzRecoveryServicesBackupContainer `
-        -ContainerType AzureVM `
+    $backupItems = Get-AzRecoveryServicesBackupItem `
+        -WorkloadType AzureVM `
+        -BackupManagementType AzureVM `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.FriendlyName -eq $VMName }
+
+    foreach ($item in $backupItems) {
+
+        Write-Host "[ACTION] Disabling backup in vault:" $vault.Name
+
+        Disable-AzRecoveryServicesBackupProtection `
+            -Item $item `
+            -RemoveRecoveryPoints `
+            -Force
+
+        Write-Host "[OK] Backup removed"
+    }
+}
+
+# ================================
+# DELETE RESTORE POINT COLLECTIONS
+# ================================
+Write-Host "[ACTION] Deleting Restore Point Collections..."
+
+$rpcRGs = Get-AzResourceGroup | Where-Object { $_.ResourceGroupName -like "AzureBackupRG_*" }
+
+foreach ($rg in $rpcRGs) {
+
+    $collections = Get-AzRestorePointCollection `
+        -ResourceGroupName $rg.ResourceGroupName `
         -ErrorAction SilentlyContinue
 
-    foreach ($container in $containers) {
+    foreach ($collection in $collections) {
 
-        if ($container.FriendlyName -ne $VMName) { continue }
+        Write-Host "[ACTION] Removing RPC:" $collection.Name
 
-        Write-Host "[FOUND] Backup found in vault:" $vault.Name
-        $backupFound = $true
+        Remove-AzRestorePointCollection `
+            -ResourceGroupName $rg.ResourceGroupName `
+            -Name $collection.Name `
+            -Force
 
-        $backupItem = Get-AzRecoveryServicesBackupItem `
-            -Container $container `
-            -WorkloadType AzureVM `
-            -ErrorAction Stop
-
-        Write-Host "[ACTION] Disabling backup protection..."
-        Disable-AzRecoveryServicesBackupProtection `
-            -Item $backupItem `
-            -RemoveRecoveryPoints `
-            -Force | Out-Null
-
-        Write-Host "[OK] Backup protection disabled"
-        Write-Host "[NOTE] Soft Delete is ENABLED by Azure default and is NOT a migration blocker"
-
-        break
+        Write-Host "[OK] RPC deleted"
     }
-
-    if ($backupFound) { break }
-}
-
-if (-not $backupFound) {
-    Write-Host "[OK] No Azure Backup configured for this VM"
 }
 
 # ================================
-# FINAL STATUS
+# WAIT FOR CLEANUP
 # ================================
+Write-Host "[INFO] Waiting for restore points to clear..."
+Start-Sleep 40
+
 Write-Host "================================================="
 Write-Host " PHASE 1 COMPLETED SUCCESSFULLY"
-Write-Host " - VM deallocated"
-Write-Host " - Public IP detached"
-Write-Host " - Backup protection removed"
-Write-Host " - Soft Delete ignored (by design)"
+Write-Host " VM stopped"
+Write-Host " Public IP detached"
+Write-Host " Backup removed"
+Write-Host " Restore points deleted"
 Write-Host "================================================="
-
-exit 0
