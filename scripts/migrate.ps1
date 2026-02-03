@@ -43,19 +43,16 @@ Write-Host "VM deallocated."
 # ================================
 # DISASSOCIATE PUBLIC IP
 # ================================
-Write-Host "Checking NICs for Public IP..."
+Write-Host "Detaching Public IP (if any)..."
 
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
 
     foreach ($ipConfig in $nic.IpConfigurations) {
-
         if ($ipConfig.PublicIpAddress) {
 
-            $pipId   = $ipConfig.PublicIpAddress.Id
-            $pipName = ($pipId -split "/")[-1]
-
+            $pipName = ($ipConfig.PublicIpAddress.Id -split "/")[-1]
             Write-Host "Detaching Public IP:" $pipName
 
             Set-AzNetworkInterfaceIpConfig `
@@ -64,82 +61,61 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
                 -PublicIpAddress $null
 
             Set-AzNetworkInterface -NetworkInterface $nic
-
-            Write-Host "Public IP detached successfully."
         }
     }
 }
 
 # ================================
-# BACKUP STATUS CHECK (AUTHORITATIVE)
+# BACKUP CLEANUP (ROBUST METHOD)
 # ================================
-Write-Host "Checking Azure Backup status..."
+Write-Host "Searching Recovery Services Vaults..."
 
-$backupStatus = Get-AzRecoveryServicesBackupStatus `
-    -ResourceId $vm.Id `
-    -Type AzureVM
+$vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
 
-if (-not $backupStatus.BackedUp) {
-    Write-Host "VM is NOT backed up. Skipping backup cleanup."
-    return
+foreach ($vault in $vaults) {
+
+    Write-Host "Checking vault:" $vault.Name
+    Set-AzRecoveryServicesVaultContext -Vault $vault
+
+    $containers = Get-AzRecoveryServicesBackupContainer `
+        -ContainerType AzureVM `
+        -ErrorAction SilentlyContinue
+
+    foreach ($container in $containers) {
+
+        if ($container.FriendlyName -ne $VMName) {
+            continue
+        }
+
+        Write-Host "Backup container FOUND for VM in vault:" $vault.Name
+
+        $backupItem = Get-AzRecoveryServicesBackupItem `
+            -Container $container `
+            -WorkloadType AzureVM `
+            -ErrorAction Stop
+
+        Write-Host "Disabling backup protection..."
+
+        Disable-AzRecoveryServicesBackupProtection `
+            -Item $backupItem `
+            -RemoveRecoveryPoints `
+            -Force
+
+        Write-Host "Backup protection disabled."
+
+        Write-Host "Disabling soft delete..."
+        Set-AzRecoveryServicesVaultProperty `
+            -Vault $vault `
+            -SoftDeleteFeatureState Disable
+
+        Write-Host "Soft delete disabled."
+
+        Write-Host "Backup cleanup completed."
+        return
+    }
 }
 
-Write-Host "VM IS backed up."
-Write-Host "Vault Name :" $backupStatus.VaultName
-Write-Host "Vault RG   :" $backupStatus.VaultResourceGroup
-
-# ================================
-# GET VAULT (EXACT)
-# ================================
-$vault = Get-AzRecoveryServicesVault `
-    -Name $backupStatus.VaultName `
-    -ResourceGroupName $backupStatus.VaultResourceGroup
-
-Set-AzRecoveryServicesVaultContext -Vault $vault
-
-# ================================
-# GET BACKUP CONTAINER
-# ================================
-$container = Get-AzRecoveryServicesBackupContainer `
-    -ContainerType AzureVM `
-    -ErrorAction Stop |
-    Where-Object { $_.FriendlyName -eq $VMName }
-
-if (-not $container) {
-    throw "Backup container not found for VM."
-}
-
-# ================================
-# GET BACKUP ITEM
-# ================================
-$backupItem = Get-AzRecoveryServicesBackupItem `
-    -Container $container `
-    -WorkloadType AzureVM `
-    -ErrorAction Stop
-
-# ================================
-# DISABLE BACKUP
-# ================================
-Write-Host "Disabling backup protection..."
-
-Disable-AzRecoveryServicesBackupProtection `
-    -Item $backupItem `
-    -RemoveRecoveryPoints `
-    -Force
-
-Write-Host "Backup protection disabled."
-
-# ================================
-# DISABLE SOFT DELETE
-# ================================
-Write-Host "Disabling Soft Delete..."
-
-Set-AzRecoveryServicesVaultProperty `
-    -Vault $vault `
-    -SoftDeleteFeatureState Disable
-
-Write-Host "Soft Delete disabled."
-
+Write-Host "No backup found for VM."
 Write-Host "======================================="
 Write-Host " PHASE 1 COMPLETED SUCCESSFULLY "
 Write-Host "======================================="
