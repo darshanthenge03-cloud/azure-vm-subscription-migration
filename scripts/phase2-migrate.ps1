@@ -44,29 +44,57 @@ foreach ($disk in $vm.StorageProfile.DataDisks) {
     $resourceIds += $disk.ManagedDisk.Id
 }
 
-# NICs
+# ================================
+# NIC + NETWORK DEPENDENCIES
+# ================================
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
     $resourceIds += $nic.Id
+
+    # Subnet
+    $subnetId = $nic.IpConfigurations[0].Subnet.Id
+
+    # VNet
+    $vnetId = ($subnetId -replace "/subnets/.*","")
+    if ($resourceIds -notcontains $vnetId) {
+        $resourceIds += $vnetId
+    }
+
+    # NSG attached to NIC
+    if ($nic.NetworkSecurityGroup) {
+        $resourceIds += $nic.NetworkSecurityGroup.Id
+    }
+
+    # Route table attached to subnet
+    $subnetParts = $subnetId -split "/"
+    $vnetName = $subnetParts[8]
+    $subnetName = $subnetParts[10]
+
+    $vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $SourceResourceGroup
+    $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $subnetName }
+
+    if ($subnet.RouteTable) {
+        $resourceIds += $subnet.RouteTable.Id
+    }
 
     $NicPipMap[$nic.Name] = @{
         IpConfigName = $nic.IpConfigurations[0].Name
     }
 }
 
-# Public IPs
+# ================================
+# PUBLIC IP
+# ================================
 $pips = Get-AzPublicIpAddress -ResourceGroupName $SourceResourceGroup -ErrorAction SilentlyContinue
 
 foreach ($pip in $pips) {
-
     $resourceIds += $pip.Id
-
     $primaryNic = $NicPipMap.Keys | Select-Object -First 1
     $NicPipMap[$primaryNic]["PipName"] = $pip.Name
 }
 
-Write-Host "[INFO] Resources to move:"
+Write-Host "[INFO] Final resources to move:"
 $resourceIds | ForEach-Object { Write-Host $_ }
 
 # ================================
@@ -75,12 +103,10 @@ $resourceIds | ForEach-Object { Write-Host $_ }
 Set-AzContext -SubscriptionId $DestinationSubscriptionId | Out-Null
 
 if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
-
     Write-Host "[ACTION] Creating destination RG..."
     New-AzResourceGroup `
         -Name $DestinationResourceGroup `
         -Location $DestinationLocation | Out-Null
-
     Write-Host "[OK] Destination RG created"
 }
 else {
@@ -88,7 +114,7 @@ else {
 }
 
 # ================================
-# SWITCH BACK TO SOURCE FOR MOVE
+# MOVE
 # ================================
 Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
 
