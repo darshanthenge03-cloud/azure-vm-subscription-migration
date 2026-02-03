@@ -1,5 +1,5 @@
-Import-Module Az.Resources -Force
 $ErrorActionPreference = "Stop"
+Import-Module Az.Resources -Force
 
 # ================================
 # USER INPUT
@@ -53,26 +53,45 @@ while ($state.DisplayStatus -ne "VM deallocated")
 # ================================
 # BACKUP CLEANUP
 # ================================
+Write-Host "Checking Azure Backup..."
+
 $vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
 
 foreach ($vault in $vaults) {
+
+    Write-Host "Checking vault:" $vault.Name
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
-    $backupItem = Get-AzRecoveryServicesBackupItem `
-        -WorkloadType AzureVM `
-        -BackupManagementType AzureVM `
-        -ErrorAction SilentlyContinue |
-        Where-Object FriendlyName -eq $VMName
+    $containers = Get-AzRecoveryServicesBackupContainer `
+        -ContainerType AzureVM `
+        -Status Registered `
+        -ErrorAction SilentlyContinue
 
-    if ($backupItem) {
-        Disable-AzRecoveryServicesBackupProtection `
-            -Item $backupItem `
-            -RemoveRecoveryPoints `
-            -Force
+    foreach ($container in $containers) {
 
-        Set-AzRecoveryServicesVaultProperty `
-            -Vault $vault `
-            -SoftDeleteFeatureState Disable
+        $backupItem = Get-AzRecoveryServicesBackupItem `
+            -Container $container `
+            -WorkloadType AzureVM `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -eq $VMName }
+
+        if ($backupItem) {
+            Write-Host "Backup FOUND for VM:" $VMName
+
+            Disable-AzRecoveryServicesBackupProtection `
+                -Item $backupItem `
+                -RemoveRecoveryPoints `
+                -Force
+
+            Write-Host "Backup protection disabled."
+
+            Write-Host "Disabling soft delete..."
+            Set-AzRecoveryServicesVaultProperty `
+                -Vault $vault `
+                -SoftDeleteFeatureState Disable
+
+            Write-Host "Soft delete disabled."
+        }
     }
 }
 
