@@ -1,3 +1,7 @@
+Import-Module Az.Accounts
+Import-Module Az.Compute
+Import-Module Az.Network
+Import-Module Az.Resources
 $ErrorActionPreference = "Stop"
 
 # ================================
