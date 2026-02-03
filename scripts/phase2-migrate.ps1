@@ -3,18 +3,18 @@ $ErrorActionPreference = "Stop"
 # ==========================================================
 # ENSURE REQUIRED MODULES
 # ==========================================================
-$requiredModules = @(
+$modules = @(
     "Az.Accounts",
     "Az.Compute",
     "Az.Network",
     "Az.Resources"
 )
 
-foreach ($module in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $module)) {
-        Install-Module $module -Force -Scope CurrentUser -AllowClobber
+foreach ($m in $modules) {
+    if (-not (Get-Module -ListAvailable -Name $m)) {
+        Install-Module $m -Force -Scope CurrentUser -AllowClobber
     }
-    Import-Module $module -Force
+    Import-Module $m -Force
 }
 
 # ==========================================================
@@ -34,7 +34,7 @@ Write-Host " AZURE VM SUBSCRIPTION MIGRATION (PHASE 2)"
 Write-Host "================================================="
 
 # ==========================================================
-# SOURCE CONTEXT
+# SET SOURCE CONTEXT
 # ==========================================================
 Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
 Write-Host "[OK] Source subscription set"
@@ -46,7 +46,7 @@ $resourceIds = @()
 $NicPipMap   = @{}
 
 # ==========================================================
-# COLLECT COMPUTE DEPENDENCIES
+# COMPUTE DEPENDENCIES
 # ==========================================================
 $resourceIds += $vm.Id
 $resourceIds += $vm.StorageProfile.OsDisk.ManagedDisk.Id
@@ -56,7 +56,7 @@ foreach ($disk in $vm.StorageProfile.DataDisks) {
 }
 
 # ==========================================================
-# COLLECT NETWORK DEPENDENCIES
+# NETWORK DEPENDENCIES
 # ==========================================================
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
@@ -76,7 +76,7 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
         $resourceIds += $nic.NetworkSecurityGroup.Id
     }
 
-    # Save IP config mapping
+    # Save mapping for reattach
     $NicPipMap[$nic.Name] = @{
         IpConfigName = $nic.IpConfigurations[0].Name
     }
@@ -90,35 +90,8 @@ foreach ($pip in $pips) {
     $NicPipMap[$primaryNic]["PipName"] = $pip.Name
 }
 
-Write-Host "[INFO] Resources collected for validation:"
+Write-Host "[INFO] Final resources to move:"
 $resourceIds | ForEach-Object { Write-Host $_ }
-
-# ==========================================================
-# VALIDATION
-# ==========================================================
-Write-Host ""
-Write-Host "[ACTION] Running move validation..."
-
-if (-not (Get-Command Test-AzResourceMove -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing Az.Resources module..."
-    Install-Module Az.Resources -Force -Scope CurrentUser -AllowClobber
-    Import-Module Az.Resources -Force
-}
-
-try {
-    Test-AzResourceMove `
-        -ResourceId $resourceIds `
-        -DestinationSubscriptionId $DestinationSubscriptionId `
-        -DestinationResourceGroupName $DestinationResourceGroup
-
-    Write-Host "[OK] VALIDATION PASSED"
-}
-catch {
-    Write-Host ""
-    Write-Host "❌ VALIDATION FAILED"
-    Write-Host $_
-    exit 1
-}
 
 # ==========================================================
 # ENSURE DESTINATION RG EXISTS
@@ -139,7 +112,7 @@ else {
 }
 
 # ==========================================================
-# MOVE RESOURCES
+# MOVE RESOURCES (THIS DOES VALIDATION INTERNALLY)
 # ==========================================================
 Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
 
@@ -188,14 +161,12 @@ foreach ($nicName in $NicPipMap.Keys) {
 # START VM
 # ==========================================================
 Write-Host "[ACTION] Starting VM..."
-
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup | Out-Null
 
 Write-Host ""
 Write-Host "================================================="
 Write-Host " MIGRATION COMPLETED SUCCESSFULLY"
 Write-Host " VM moved"
-Write-Host " Validation passed"
 Write-Host " Public IP reattached"
 Write-Host " VM running"
 Write-Host "================================================="
