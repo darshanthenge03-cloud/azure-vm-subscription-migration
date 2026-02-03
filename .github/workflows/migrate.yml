@@ -30,6 +30,10 @@ jobs:
         shell: pwsh
         run: |
           Install-Module Az -Force -AllowClobber
+          Install-Module Az.Accounts -Force -AllowClobber
+          Install-Module Az.Compute -Force -AllowClobber
+          Install-Module Az.Network -Force -AllowClobber
+          Install-Module Az.Resources -Force -AllowClobber
 
       - name: Validate Azure Context
         shell: pwsh
