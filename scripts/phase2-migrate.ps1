@@ -121,13 +121,15 @@ Write-Host "[OK] Pre-move validation PASSED"
 # ================================
 # MOVE
 # ================================
+Write-Host "[INFO] Setting Azure CLI to SOURCE subscription..."
+az account set --subscription $SourceSubscriptionId
+
 Write-Host "[ACTION] Moving resources..."
-Write-Host "[ACTION] Moving resources using Azure CLI..."
 
 az resource move `
-    --destination-group $DestinationResourceGroup `
-    --destination-subscription-id $DestinationSubscriptionId `
-    --ids $(($resourceIds -join " "))
+  --destination-group $DestinationResourceGroup `
+  --destination-subscription-id $DestinationSubscriptionId `
+  --ids $($resourceIds -join " ")
 
 Write-Host "[OK] Resource move completed"
 
