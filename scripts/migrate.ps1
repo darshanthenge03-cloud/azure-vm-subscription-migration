@@ -9,7 +9,7 @@ $VMName         = "ubuntuServer"
 
 # ================================
 Write-Host "======================================="
-Write-Host " PHASE 1: IP DETACH + BACKUP CLEANUP "
+Write-Host " PHASE 1: VM STOP | IP DETACH | BACKUP CLEANUP "
 Write-Host "======================================="
 
 # ================================
@@ -50,6 +50,7 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
 
     foreach ($ipConfig in $nic.IpConfigurations) {
+
         if ($ipConfig.PublicIpAddress) {
 
             $pipName = ($ipConfig.PublicIpAddress.Id -split "/")[-1]
@@ -68,12 +69,11 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 }
 
 # ================================
-# BACKUP CLEANUP (STABLE METHOD)
+# BACKUP CLEANUP (ROBUST + SAFE)
 # ================================
 Write-Host "Searching Recovery Services Vaults..."
 
 $vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
-
 $backupFound = $false
 
 foreach ($vault in $vaults) {
@@ -91,7 +91,7 @@ foreach ($vault in $vaults) {
             continue
         }
 
-        Write-Host "Backup container FOUND in vault:" $vault.Name
+        Write-Host "Backup FOUND in vault:" $vault.Name
         $backupFound = $true
 
         $backupItem = Get-AzRecoveryServicesBackupItem `
@@ -108,12 +108,23 @@ foreach ($vault in $vaults) {
 
         Write-Host "Backup protection disabled."
 
-        Write-Host "Disabling Soft Delete..."
-        Set-AzRecoveryServicesVaultProperty `
-            -VaultId $vault.Id `
-            -SoftDeleteFeatureState Disable
+        # ================================
+        # SOFT DELETE (BEST EFFORT)
+        # ================================
+        Write-Host "Attempting to disable Soft Delete..."
 
-        Write-Host "Soft Delete disabled."
+        try {
+            Set-AzRecoveryServicesVaultProperty `
+                -VaultId $vault.Id `
+                -SoftDeleteFeatureState Disable
+
+            Write-Host "Soft Delete disabled."
+        }
+        catch {
+            Write-Warning "Soft Delete could not be disabled now."
+            Write-Warning "This is expected immediately after backup deletion."
+            Write-Warning "You can disable it later or via a separate script."
+        }
 
         break
     }
@@ -127,6 +138,7 @@ if (-not $backupFound) {
 
 Write-Host "======================================="
 Write-Host " PHASE 1 COMPLETED SUCCESSFULLY "
+Write-Host " VM STOPPED | IP DETACHED | BACKUP REMOVED "
 Write-Host "======================================="
 
 exit 0
