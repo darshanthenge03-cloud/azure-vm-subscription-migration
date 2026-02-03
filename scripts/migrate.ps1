@@ -43,7 +43,7 @@ Write-Host "VM deallocated."
 # ================================
 # DISASSOCIATE PUBLIC IP
 # ================================
-Write-Host "Detaching Public IP (if any)..."
+Write-Host "Checking NICs for Public IP..."
 
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
@@ -61,16 +61,20 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
                 -PublicIpAddress $null
 
             Set-AzNetworkInterface -NetworkInterface $nic
+
+            Write-Host "Public IP detached."
         }
     }
 }
 
 # ================================
-# BACKUP CLEANUP (ROBUST METHOD)
+# BACKUP CLEANUP (STABLE METHOD)
 # ================================
 Write-Host "Searching Recovery Services Vaults..."
 
 $vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
+
+$backupFound = $false
 
 foreach ($vault in $vaults) {
 
@@ -87,7 +91,8 @@ foreach ($vault in $vaults) {
             continue
         }
 
-        Write-Host "Backup container FOUND for VM in vault:" $vault.Name
+        Write-Host "Backup container FOUND in vault:" $vault.Name
+        $backupFound = $true
 
         $backupItem = Get-AzRecoveryServicesBackupItem `
             -Container $container `
@@ -103,19 +108,25 @@ foreach ($vault in $vaults) {
 
         Write-Host "Backup protection disabled."
 
-        Write-Host "Disabling soft delete..."
+        Write-Host "Disabling Soft Delete..."
         Set-AzRecoveryServicesVaultProperty `
             -Vault $vault `
             -SoftDeleteFeatureState Disable
 
-        Write-Host "Soft delete disabled."
+        Write-Host "Soft Delete disabled."
 
-        Write-Host "Backup cleanup completed."
-        return
+        break
     }
+
+    if ($backupFound) { break }
 }
 
-Write-Host "No backup found for VM."
+if (-not $backupFound) {
+    Write-Host "No Azure Backup found for this VM."
+}
+
 Write-Host "======================================="
 Write-Host " PHASE 1 COMPLETED SUCCESSFULLY "
 Write-Host "======================================="
+
+exit 0
