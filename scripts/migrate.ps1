@@ -1,49 +1,51 @@
 $ErrorActionPreference = "Stop"
 
 # ================================
-# INPUT
+# USER INPUT
 # ================================
 $SubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
 $ResourceGroup  = "Dev-RG"
 $VMName         = "ubuntuServer"
 
 # ================================
-Write-Host "======================================="
-Write-Host " PHASE 1: VM STOP | IP DETACH | BACKUP CLEANUP "
-Write-Host "======================================="
+Write-Host "================================================="
+Write-Host " AZURE VM PRE-MIGRATION CLEANUP SCRIPT (PHASE 1)"
+Write-Host "================================================="
 
 # ================================
-# CONTEXT
+# SET CONTEXT
 # ================================
-Set-AzContext -SubscriptionId $SubscriptionId
-Write-Host "Subscription context set."
+Write-Host "[INFO] Setting Azure subscription context..."
+Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
+Write-Host "[OK] Subscription context set"
 
 # ================================
 # GET VM
 # ================================
+Write-Host "[INFO] Fetching VM details..."
 $vm = Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroup
-Write-Host "VM found:" $vm.Name
+Write-Host "[OK] VM found:" $vm.Name
 
 # ================================
 # STOP & DEALLOCATE VM
 # ================================
-Write-Host "Stopping VM..."
-Stop-AzVM -Name $VMName -ResourceGroupName $ResourceGroup -Force
+Write-Host "[INFO] Stopping VM..."
+Stop-AzVM -Name $VMName -ResourceGroupName $ResourceGroup -Force | Out-Null
 
 do {
     Start-Sleep 10
     $state = (Get-AzVM -Name $VMName -ResourceGroupName $ResourceGroup -Status).Statuses |
         Where-Object Code -like "PowerState/*"
-    Write-Host "VM state:" $state.DisplayStatus
+    Write-Host "[WAIT] VM state:" $state.DisplayStatus
 }
 while ($state.DisplayStatus -ne "VM deallocated")
 
-Write-Host "VM deallocated."
+Write-Host "[OK] VM successfully deallocated"
 
 # ================================
-# DISASSOCIATE PUBLIC IP
+# DETACH PUBLIC IP
 # ================================
-Write-Host "Checking NICs for Public IP..."
+Write-Host "[INFO] Checking NICs for Public IP association..."
 
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
@@ -54,31 +56,31 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
         if ($ipConfig.PublicIpAddress) {
 
             $pipName = ($ipConfig.PublicIpAddress.Id -split "/")[-1]
-            Write-Host "Detaching Public IP:" $pipName
+            Write-Host "[ACTION] Detaching Public IP:" $pipName
 
             Set-AzNetworkInterfaceIpConfig `
                 -NetworkInterface $nic `
                 -Name $ipConfig.Name `
-                -PublicIpAddress $null
+                -PublicIpAddress $null | Out-Null
 
-            Set-AzNetworkInterface -NetworkInterface $nic
+            Set-AzNetworkInterface -NetworkInterface $nic | Out-Null
 
-            Write-Host "Public IP detached."
+            Write-Host "[OK] Public IP detached"
         }
     }
 }
 
 # ================================
-# BACKUP CLEANUP (ROBUST + SAFE)
+# AZURE BACKUP CLEANUP (REAL BLOCKER)
 # ================================
-Write-Host "Searching Recovery Services Vaults..."
+Write-Host "[INFO] Searching for Azure Backup protection..."
 
 $vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
 $backupFound = $false
 
 foreach ($vault in $vaults) {
 
-    Write-Host "Checking vault:" $vault.Name
+    Write-Host "[INFO] Checking vault:" $vault.Name
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
     $containers = Get-AzRecoveryServicesBackupContainer `
@@ -87,11 +89,9 @@ foreach ($vault in $vaults) {
 
     foreach ($container in $containers) {
 
-        if ($container.FriendlyName -ne $VMName) {
-            continue
-        }
+        if ($container.FriendlyName -ne $VMName) { continue }
 
-        Write-Host "Backup FOUND in vault:" $vault.Name
+        Write-Host "[FOUND] Backup found in vault:" $vault.Name
         $backupFound = $true
 
         $backupItem = Get-AzRecoveryServicesBackupItem `
@@ -99,32 +99,14 @@ foreach ($vault in $vaults) {
             -WorkloadType AzureVM `
             -ErrorAction Stop
 
-        Write-Host "Disabling backup protection..."
-
+        Write-Host "[ACTION] Disabling backup protection..."
         Disable-AzRecoveryServicesBackupProtection `
             -Item $backupItem `
             -RemoveRecoveryPoints `
-            -Force
+            -Force | Out-Null
 
-        Write-Host "Backup protection disabled."
-
-        # ================================
-        # SOFT DELETE (BEST EFFORT)
-        # ================================
-        Write-Host "Attempting to disable Soft Delete..."
-
-        try {
-            Set-AzRecoveryServicesVaultProperty `
-                -VaultId $vault.Id `
-                -SoftDeleteFeatureState Disable
-
-            Write-Host "Soft Delete disabled."
-        }
-        catch {
-            Write-Warning "Soft Delete could not be disabled now."
-            Write-Warning "This is expected immediately after backup deletion."
-            Write-Warning "You can disable it later or via a separate script."
-        }
+        Write-Host "[OK] Backup protection disabled"
+        Write-Host "[NOTE] Soft Delete is ENABLED by Azure default and is NOT a migration blocker"
 
         break
     }
@@ -133,12 +115,18 @@ foreach ($vault in $vaults) {
 }
 
 if (-not $backupFound) {
-    Write-Host "No Azure Backup found for this VM."
+    Write-Host "[OK] No Azure Backup configured for this VM"
 }
 
-Write-Host "======================================="
-Write-Host " PHASE 1 COMPLETED SUCCESSFULLY "
-Write-Host " VM STOPPED | IP DETACHED | BACKUP REMOVED "
-Write-Host "======================================="
+# ================================
+# FINAL STATUS
+# ================================
+Write-Host "================================================="
+Write-Host " PHASE 1 COMPLETED SUCCESSFULLY"
+Write-Host " - VM deallocated"
+Write-Host " - Public IP detached"
+Write-Host " - Backup protection removed"
+Write-Host " - Soft Delete ignored (by design)"
+Write-Host "================================================="
 
 exit 0
