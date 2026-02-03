@@ -106,13 +106,15 @@ else {
 # ================================
 # VALIDATION
 # ================================
-Import-Module Az.Resources -Force
+Write-Host "[INFO] Running move validation using Azure CLI..."
 
-Write-Host "[INFO] Running Test-AzResourceMove..."
-Test-AzResourceMove `
-    -ResourceId $resourceIds `
-    -DestinationSubscriptionId $DestinationSubscriptionId `
-    -DestinationResourceGroupName $DestinationResourceGroup
+$resourceIdsJson = $resourceIds | ConvertTo-Json -Depth 5
+
+az resource move `
+    --destination-group $DestinationResourceGroup `
+    --destination-subscription-id $DestinationSubscriptionId `
+    --ids $(($resourceIds -join " ")) `
+    --validate
 
 Write-Host "[OK] Pre-move validation PASSED"
 
@@ -120,11 +122,12 @@ Write-Host "[OK] Pre-move validation PASSED"
 # MOVE
 # ================================
 Write-Host "[ACTION] Moving resources..."
-Move-AzResource `
-    -ResourceId $resourceIds `
-    -DestinationSubscriptionId $DestinationSubscriptionId `
-    -DestinationResourceGroupName $DestinationResourceGroup `
-    -Force
+Write-Host "[ACTION] Moving resources using Azure CLI..."
+
+az resource move `
+    --destination-group $DestinationResourceGroup `
+    --destination-subscription-id $DestinationSubscriptionId `
+    --ids $(($resourceIds -join " "))
 
 Write-Host "[OK] Resource move completed"
 
