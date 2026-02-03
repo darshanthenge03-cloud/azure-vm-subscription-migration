@@ -2,31 +2,54 @@ name: Azure VM Subscription Migration
 
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        description: "Select phase to run"
+        required: true
+        default: "phase1"
+        type: choice
+        options:
+          - phase1
+          - phase2
+          - full
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Azure Login
-      uses: azure/login@v2
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
-        enable-AzPSSession: true
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
 
-    - name: Install Az PowerShell
-      shell: pwsh
-      run: |
-        Install-Module Az -Force -AllowClobber
+      - name: Install Az PowerShell
+        shell: pwsh
+        run: |
+          Install-Module Az -Force -AllowClobber
 
-    - name: Validate Azure Context
-      shell: pwsh
-      run: |
-        Get-AzContext
+      - name: Validate Azure Context
+        shell: pwsh
+        run: |
+          Get-AzContext
 
-    - name: Run VM Migration Script
-      shell: pwsh
-      run: |
-        ./scripts/migrate.ps1
+      # ----------------------------
+      # Phase 1
+      # ----------------------------
+      - name: Run Phase 1 (Pre-Migration)
+        if: ${{ github.event.inputs.phase == 'phase1' || github.event.inputs.phase == 'full' }}
+        shell: pwsh
+        run: |
+          ./scripts/phase1-pre-migration.ps1
+
+      # ----------------------------
+      # Phase 2
+      # ----------------------------
+      - name: Run Phase 2 (Migration)
+        if: ${{ github.event.inputs.phase == 'phase2' || github.event.inputs.phase == 'full' }}
+        shell: pwsh
+        run: |
+          ./scripts/phase2-migrate.ps1
