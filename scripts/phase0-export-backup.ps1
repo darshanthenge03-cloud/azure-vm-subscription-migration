@@ -34,13 +34,17 @@ $export = [PSCustomObject]@{
 }
 
 $workspace = $env:GITHUB_WORKSPACE
+
+if (-not $workspace) {
+    throw "GITHUB_WORKSPACE not available!"
+}
+
 $path = Join-Path $workspace "backup-config.json"
 
-$export | ConvertTo-Json -Depth 20 | Out-File $path -Force
+$export | ConvertTo-Json -Depth 20 | Set-Content -Path $path -Force
 
 Write-Host "Backup configuration exported to:"
 Write-Host $path
 
-# Debug
 Write-Host "Files in workspace:"
-Get-ChildItem $workspace
+Get-ChildItem -Path $workspace
