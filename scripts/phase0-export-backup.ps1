@@ -48,3 +48,9 @@ Write-Host $path
 
 Write-Host "Files in workspace:"
 Get-ChildItem -Path $workspace
+
+Write-Host "Full workspace path:"
+Write-Host $env:GITHUB_WORKSPACE
+
+Write-Host "Listing files:"
+Get-ChildItem -Recurse
