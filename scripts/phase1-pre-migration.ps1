@@ -23,7 +23,7 @@ foreach ($m in $modules) {
 # ==========================================================
 $SourceSubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
 $SourceResourceGroup  = "Dev-RG"
-$VMName               = "ubuntuServer"
+$VMName               = "ubuntu"
 
 Write-Host "================================================="
 Write-Host " PHASE 1 - PRE MIGRATION CLEANUP"
