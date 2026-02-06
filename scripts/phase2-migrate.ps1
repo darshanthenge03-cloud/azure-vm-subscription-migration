@@ -27,7 +27,7 @@ $SourceResourceGroup       = "Dev-RG"
 $DestinationResourceGroup  = "Dev-RG"
 $DestinationLocation       = "centralindia"
 
-$VMName = "ubuntuServer"
+$VMName = "ubuntu"
 
 Write-Host "================================================="
 Write-Host " AZURE VM SUBSCRIPTION MIGRATION (PHASE 2)"
