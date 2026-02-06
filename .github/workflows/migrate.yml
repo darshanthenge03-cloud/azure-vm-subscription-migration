@@ -9,8 +9,10 @@ on:
         default: "phase1"
         type: choice
         options:
+          - phase0
           - phase1
           - phase2
+          - phase3
           - full
 
 jobs:
@@ -41,6 +43,15 @@ jobs:
           Get-AzContext
 
       # ----------------------------
+      # Phase 0
+      # ----------------------------
+      - name: Run Phase 0 (Export Backup)
+        if: ${{ github.event.inputs.phase == 'phase0' || github.event.inputs.phase == 'full' }}
+        shell: pwsh
+        run: |
+          ./scripts/phase0-export-backup.ps1 
+
+      # ----------------------------
       # Phase 1
       # ----------------------------
       - name: Run Phase 1 (Pre-Migration)
@@ -57,3 +68,12 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/phase2-migrate.ps1
+
+      # ----------------------------
+      # Phase 3
+      # ----------------------------
+      - name: Run Phase 3 (Restore Backup)
+        if: ${{ github.event.inputs.phase == 'phase3' || github.event.inputs.phase == 'full' }}
+        shell: pwsh
+        run: |
+          ./scripts/phase3-restore-backup.ps1    
