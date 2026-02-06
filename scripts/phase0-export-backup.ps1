@@ -5,7 +5,7 @@ Import-Module Az.RecoveryServices -Force
 
 # INPUT
 $SourceSubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
-$VMName = "ubuntuServer"
+$VMName = "ubuntu"
 
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
