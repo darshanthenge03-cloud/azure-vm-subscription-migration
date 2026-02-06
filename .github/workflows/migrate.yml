@@ -53,8 +53,8 @@ jobs:
       - name: Upload Backup Config Artifact
         uses: actions/upload-artifact@v4
         with:
-        name: backup-config
-        path: backup-config.json   
+         name: backup-config
+         path: backup-config.json   
         
       # ----------------------------
       # Phase 1
