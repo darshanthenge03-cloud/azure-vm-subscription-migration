@@ -33,6 +33,14 @@ $export = [PSCustomObject]@{
     Retention        = $policy.RetentionPolicy
 }
 
-$export | ConvertTo-Json -Depth 10 | Out-File "./backup-config.json"
+$workspace = $env:GITHUB_WORKSPACE
+$path = Join-Path $workspace "backup-config.json"
 
-Write-Host "Backup configuration exported to backup-config.json"
+$export | ConvertTo-Json -Depth 20 | Out-File $path -Force
+
+Write-Host "Backup configuration exported to:"
+Write-Host $path
+
+# Debug
+Write-Host "Files in workspace:"
+Get-ChildItem $workspace
