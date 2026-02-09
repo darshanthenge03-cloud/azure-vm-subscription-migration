@@ -7,27 +7,38 @@ Import-Module Az.RecoveryServices -Force
 
 Write-Host "========== PHASE 0: EXPORT BACKUP =========="
 
-# Set correct subscription
+# Switch to Source Subscription
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-# Get VM backup item directly
-Write-Host "Getting backup item for VM: $VMName"
+# Vault name from portal
+$VaultName = "ubuntu-vault"
 
+Write-Host "Using Recovery Vault: $VaultName"
+
+# Get vault
+$vault = Get-AzRecoveryServicesVault -Name $VaultName
+Set-AzRecoveryServicesVaultContext -Vault $vault
+
+# Get container for this VM
+$container = Get-AzRecoveryServicesBackupContainer `
+    -ContainerType AzureVM `
+    -FriendlyName $VMName `
+    -Status Registered
+
+if (-not $container) {
+    throw "Backup container not found for VM '$VMName'"
+}
+
+# Get backup item from container
 $backupItem = Get-AzRecoveryServicesBackupItem `
-    -WorkloadType AzureVM `
-    -Name $VMName `
-    -ErrorAction SilentlyContinue
+    -Container $container `
+    -WorkloadType AzureVM
 
 if (-not $backupItem) {
     throw "Backup item not found for VM '$VMName'"
 }
 
-# Get vault from backup item
-$vaultId = $backupItem.Id.Split("/")[8]
-$vault = Get-AzRecoveryServicesVault -Name $vaultId
-
-Set-AzRecoveryServicesVaultContext -Vault $vault
-
+# Get policy
 $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
     -Name $backupItem.ProtectionPolicyName
 
