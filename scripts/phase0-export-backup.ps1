@@ -11,7 +11,6 @@ Write-Host "==============================================="
 $SourceSubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
 $VMName               = "ubuntu"
 
-# Set Context
 Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
 Write-Host "[OK] Connected to subscription"
 
@@ -26,25 +25,26 @@ foreach ($vault in $vaults) {
 
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
-    $items = Get-AzRecoveryServicesBackupItem `
-        -WorkloadType AzureVM `
-        -BackupManagementType AzureVM `
+    # Get container for VM
+    $container = Get-AzRecoveryServicesBackupContainer `
+        -ContainerType AzureVM `
+        -FriendlyName $VMName `
         -ErrorAction SilentlyContinue
 
-    if ($items) {
+    if ($container) {
 
-        foreach ($item in $items) {
+        $item = Get-AzRecoveryServicesBackupItem `
+            -Container $container `
+            -WorkloadType AzureVM `
+            -ErrorAction SilentlyContinue
 
-            if ($item.FriendlyName -eq $VMName) {
+        if ($item) {
 
-                $vaultFound = $vault
-                $backupItem = $item
-                break
-            }
+            $vaultFound = $vault
+            $backupItem = $item
+            break
         }
     }
-
-    if ($vaultFound) { break }
 }
 
 if (-not $vaultFound) {
@@ -54,13 +54,12 @@ if (-not $vaultFound) {
 Write-Host "[OK] Vault Found:" $vaultFound.Name
 Write-Host "[OK] Backup Item Found"
 
-# Get policy
 $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
     -Name $backupItem.ProtectionPolicyName
 
 Write-Host "[OK] Policy Found:" $policy.Name
 
-# Build export object
+# Export object
 $export = [PSCustomObject]@{
     VaultName     = $vaultFound.Name
     VaultLocation = $vaultFound.Location
@@ -69,7 +68,6 @@ $export = [PSCustomObject]@{
     Retention     = $policy.RetentionPolicy
 }
 
-# Save to GitHub workspace
 $workspace = $env:GITHUB_WORKSPACE
 $path = Join-Path $workspace "backup-config.json"
 
@@ -79,6 +77,5 @@ Write-Host ""
 Write-Host "Backup configuration exported to:"
 Write-Host $path
 
-Write-Host ""
 Write-Host "Files in workspace:"
 Get-ChildItem $workspace
