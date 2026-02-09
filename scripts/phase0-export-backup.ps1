@@ -5,53 +5,62 @@ Import-Module Az.RecoveryServices -Force
 
 # INPUT
 $SourceSubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
-$SourceResourceGroup  = "Dev-RG"
-$VMName = "ubuntu"
+$VMName = "ubuntu"   # Must match EXACT name
 
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-$vault = Get-AzRecoveryServicesVault | Select-Object -First 1
-if (-not $vault) { throw "No vault found in source." }
+Write-Host "Searching for vault protecting VM: $VMName"
 
-Set-AzRecoveryServicesVaultContext -Vault $vault
+$vaults = Get-AzRecoveryServicesVault
+$vaultFound = $null
+$backupItem = $null
 
-$item = Get-AzRecoveryServicesBackupItem `
-    -WorkloadType AzureVM `
-    -BackupManagementType AzureVM |
-    Where-Object { $_.FriendlyName -eq $VMName }
+foreach ($vault in $vaults) {
 
-if (-not $item) { throw "VM not protected in vault." }
+    Write-Host "Checking vault:" $vault.Name
+    Set-AzRecoveryServicesVaultContext -Vault $vault
+
+    $items = Get-AzRecoveryServicesBackupItem `
+        -WorkloadType AzureVM `
+        -BackupManagementType AzureVM `
+        -ErrorAction SilentlyContinue
+
+    $item = $items | Where-Object { $_.FriendlyName -eq $VMName }
+
+    if ($item) {
+        $vaultFound = $vault
+        $backupItem = $item
+        break
+    }
+}
+
+if (-not $vaultFound) {
+    throw "No Recovery Services Vault found protecting VM '$VMName'"
+}
+
+Write-Host "Vault Found:" $vaultFound.Name
+Write-Host "Vault Resource Group:" $vaultFound.ResourceGroupName
 
 $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
-    -Name $item.ProtectionPolicyName
+    -Name $backupItem.ProtectionPolicyName
 
 # Build export object
 $export = [PSCustomObject]@{
-    VaultName        = $vault.Name
-    VaultLocation    = $vault.Location
+    VaultName        = $vaultFound.Name
+    VaultResourceGroup = $vaultFound.ResourceGroupName
+    VaultLocation    = $vaultFound.Location
     PolicyName       = $policy.Name
     Schedule         = $policy.SchedulePolicy
     Retention        = $policy.RetentionPolicy
 }
 
 $workspace = $env:GITHUB_WORKSPACE
-
-if (-not $workspace) {
-    throw "GITHUB_WORKSPACE not available!"
-}
-
 $path = Join-Path $workspace "backup-config.json"
 
-$export | ConvertTo-Json -Depth 20 | Set-Content -Path $path -Force
+$export | ConvertTo-Json -Depth 20 | Out-File $path -Force
 
 Write-Host "Backup configuration exported to:"
 Write-Host $path
 
 Write-Host "Files in workspace:"
-Get-ChildItem -Path $workspace
-
-Write-Host "Full workspace path:"
-Write-Host $env:GITHUB_WORKSPACE
-
-Write-Host "Listing files:"
-Get-ChildItem -Recurse
+Get-ChildItem $workspace
