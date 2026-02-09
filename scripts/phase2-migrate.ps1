@@ -8,77 +8,64 @@ Import-Module Az.Network -Force
 Import-Module Az.Resources -Force
 
 Write-Host "==========================================="
-Write-Host "PHASE 2: MIGRATION STARTED"
+Write-Host "PHASE 2: FULL STACK MIGRATION"
 Write-Host "==========================================="
 
-# ---------------------------------------------------
-# Validate Config
-# ---------------------------------------------------
-if (-not $SourceSubscriptionId -or -not $DestinationSubscriptionId -or `
-    -not $SourceResourceGroup -or -not $DestinationResourceGroup -or `
-    -not $DestinationLocation -or -not $VMName) {
-
-    throw "One or more required configuration values are missing in config.ps1"
-}
-
-# ---------------------------------------------------
-# Switch to Source Subscription
-# ---------------------------------------------------
-Write-Host "Switching to Source Subscription..."
+# Switch to Source
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-$currentContext = Get-AzContext
-Write-Host "Current Source Subscription: $($currentContext.Subscription.Id)"
-
-# ---------------------------------------------------
-# Get VM
-# ---------------------------------------------------
 $vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
 
-if (-not $vm) {
-    throw "VM '$VMName' not found in source subscription."
-}
+Write-Host "Stopping VM..."
+Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
-Write-Host "VM Found: $($vm.Name)"
-Write-Host "VM Location: $($vm.Location)"
+# ----------------------------
+# Collect Resources
+# ----------------------------
 
-# ---------------------------------------------------
-# Validate Region (Move-AzResource does NOT support cross-region)
-# ---------------------------------------------------
-if ($vm.Location -ne $DestinationLocation) {
-    throw "Cross-region migration is NOT supported. Source: $($vm.Location) | Destination: $DestinationLocation"
-}
-
-# ---------------------------------------------------
-# Collect All Dependent Resources
-# ---------------------------------------------------
 $resourcesToMove = @()
 
 # VM
 $resourcesToMove += $vm.Id
 
-# OS Disk
-if ($vm.StorageProfile.OsDisk.ManagedDisk) {
-    $resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
-}
+# Disks
+$resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
 
-# Data Disks
 foreach ($disk in $vm.StorageProfile.DataDisks) {
-    if ($disk.ManagedDisk) {
-        $resourcesToMove += $disk.ManagedDisk.Id
-    }
+    $resourcesToMove += $disk.ManagedDisk.Id
 }
 
-# NICs + Associated Public IP + NSG
+# NIC + Networking
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
     $resourcesToMove += $nic.Id
 
-    # Public IP
     foreach ($ipconfig in $nic.IpConfigurations) {
+
+        # Public IP
         if ($ipconfig.PublicIpAddress) {
-            $resourcesToMove += $ipconfig.PublicIpAddress.Id
+            $publicIp = Get-AzPublicIpAddress -ResourceId $ipconfig.PublicIpAddress.Id
+            $resourcesToMove += $publicIp.Id
+
+            # Disassociate Public IP
+            Write-Host "Disassociating Public IP..."
+            $ipconfig.PublicIpAddress = $null
+            Set-AzNetworkInterface -NetworkInterface $nic
+        }
+
+        # Subnet
+        $subnet = Get-AzVirtualNetworkSubnetConfig `
+            -VirtualNetwork (Get-AzVirtualNetwork -ResourceGroupName $SourceResourceGroup | Where-Object { $_.Subnets.Id -contains $ipconfig.Subnet.Id }) `
+            -Name ($ipconfig.Subnet.Id.Split("/")[-1])
+
+        $vnet = Get-AzVirtualNetwork -ResourceGroupName $SourceResourceGroup -Name ($ipconfig.Subnet.Id.Split("/")[8])
+
+        $resourcesToMove += $vnet.Id
+
+        # Route Table
+        if ($subnet.RouteTable) {
+            $resourcesToMove += $subnet.RouteTable.Id
         }
     }
 
@@ -88,46 +75,53 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
     }
 }
 
-# Remove duplicates
 $resourcesToMove = $resourcesToMove | Select-Object -Unique
 
-Write-Host "-------------------------------------------"
-Write-Host "Resources to Move:"
+Write-Host "Resources being moved:"
 $resourcesToMove | ForEach-Object { Write-Host $_ }
-Write-Host "-------------------------------------------"
 
-# ---------------------------------------------------
-# Switch to Destination Subscription
-# ---------------------------------------------------
-Write-Host "Switching to Destination Subscription..."
+# ----------------------------
+# Switch to Destination
+# ----------------------------
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
-$currentContext = Get-AzContext
-Write-Host "Current Destination Subscription: $($currentContext.Subscription.Id)"
-
-# ---------------------------------------------------
-# Create Destination Resource Group if needed
-# ---------------------------------------------------
-$destRG = Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue
-
-if (-not $destRG) {
-    Write-Host "Creating Destination Resource Group..."
+# Create RG if missing
+if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
     New-AzResourceGroup `
         -Name $DestinationResourceGroup `
         -Location $DestinationLocation
 }
 
-# ---------------------------------------------------
-# Perform Move
-# ---------------------------------------------------
-Write-Host "Starting Resource Move..."
-
+# ----------------------------
+# Move Resources
+# ----------------------------
+Write-Host "Starting Move..."
 Move-AzResource `
     -ResourceId $resourcesToMove `
     -DestinationSubscriptionId $DestinationSubscriptionId `
     -DestinationResourceGroupName $DestinationResourceGroup `
-    -Force `
-    -ErrorAction Stop
+    -Force
 
-Write-Host "Migration Completed Successfully."
+Write-Host "Move Completed."
+
+# ----------------------------
+# Reattach Public IP (Destination Context)
+# ----------------------------
+
+Set-AzContext -SubscriptionId $DestinationSubscriptionId
+
+$nic = Get-AzNetworkInterface -Name $vm.NetworkProfile.NetworkInterfaces[0].Id.Split("/")[-1] -ResourceGroupName $DestinationResourceGroup
+$publicIp = Get-AzPublicIpAddress -Name $publicIp.Name -ResourceGroupName $DestinationResourceGroup
+
+if ($publicIp) {
+    Write-Host "Reattaching Public IP..."
+    $nic.IpConfigurations[0].PublicIpAddress = $publicIp
+    Set-AzNetworkInterface -NetworkInterface $nic
+}
+
+# Start VM
+Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
+
+Write-Host "==========================================="
+Write-Host "MIGRATION COMPLETED SUCCESSFULLY"
 Write-Host "==========================================="
