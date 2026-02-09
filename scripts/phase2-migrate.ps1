@@ -11,7 +11,9 @@ Write-Host "==========================================="
 Write-Host "PHASE 2: FULL STACK MIGRATION"
 Write-Host "==========================================="
 
-# Switch to Source
+# ---------------------------------------------------
+# Switch to Source Subscription
+# ---------------------------------------------------
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
 $vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
@@ -19,11 +21,11 @@ $vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorActio
 Write-Host "Stopping VM..."
 Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
-# ----------------------------
+# ---------------------------------------------------
 # Collect Resources
-# ----------------------------
-
+# ---------------------------------------------------
 $resourcesToMove = @()
+$publicIpObject = $null
 
 # VM
 $resourcesToMove += $vm.Id
@@ -32,10 +34,12 @@ $resourcesToMove += $vm.Id
 $resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
 
 foreach ($disk in $vm.StorageProfile.DataDisks) {
-    $resourcesToMove += $disk.ManagedDisk.Id
+    if ($disk.ManagedDisk) {
+        $resourcesToMove += $disk.ManagedDisk.Id
+    }
 }
 
-# NIC + Networking
+# Networking
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
@@ -43,10 +47,20 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     foreach ($ipconfig in $nic.IpConfigurations) {
 
-        # Public IP
+        # ---------------------------
+        # Handle Public IP (Version Safe)
+        # ---------------------------
         if ($ipconfig.PublicIpAddress) {
-            $publicIp = Get-AzPublicIpAddress -ResourceId $ipconfig.PublicIpAddress.Id
-            $resourcesToMove += $publicIp.Id
+
+            $publicIpId   = $ipconfig.PublicIpAddress.Id
+            $publicIpName = $publicIpId.Split("/")[-1]
+            $publicIpRG   = $publicIpId.Split("/")[4]
+
+            $publicIpObject = Get-AzPublicIpAddress `
+                -Name $publicIpName `
+                -ResourceGroupName $publicIpRG
+
+            $resourcesToMove += $publicIpObject.Id
 
             # Disassociate Public IP
             Write-Host "Disassociating Public IP..."
@@ -54,16 +68,21 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
             Set-AzNetworkInterface -NetworkInterface $nic
         }
 
-        # Subnet
-        $subnet = Get-AzVirtualNetworkSubnetConfig `
-            -VirtualNetwork (Get-AzVirtualNetwork -ResourceGroupName $SourceResourceGroup | Where-Object { $_.Subnets.Id -contains $ipconfig.Subnet.Id }) `
-            -Name ($ipconfig.Subnet.Id.Split("/")[-1])
+        # ---------------------------
+        # Subnet + VNet
+        # ---------------------------
+        $subnetId = $ipconfig.Subnet.Id
+        $vnetName = $subnetId.Split("/")[8]
+        $subnetName = $subnetId.Split("/")[-1]
+        $vnetRG = $subnetId.Split("/")[4]
 
-        $vnet = Get-AzVirtualNetwork -ResourceGroupName $SourceResourceGroup -Name ($ipconfig.Subnet.Id.Split("/")[8])
+        $vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $vnetRG
 
         $resourcesToMove += $vnet.Id
 
-        # Route Table
+        # Route Table (if attached)
+        $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $subnetName }
+
         if ($subnet.RouteTable) {
             $resourcesToMove += $subnet.RouteTable.Id
         }
@@ -75,51 +94,66 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
     }
 }
 
+# Remove duplicates
 $resourcesToMove = $resourcesToMove | Select-Object -Unique
 
-Write-Host "Resources being moved:"
+Write-Host "-------------------------------------------"
+Write-Host "Resources to Move:"
 $resourcesToMove | ForEach-Object { Write-Host $_ }
+Write-Host "-------------------------------------------"
 
-# ----------------------------
-# Switch to Destination
-# ----------------------------
+# ---------------------------------------------------
+# Switch to Destination Subscription
+# ---------------------------------------------------
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
-# Create RG if missing
+# Create Destination RG if needed
 if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
+    Write-Host "Creating Destination Resource Group..."
     New-AzResourceGroup `
         -Name $DestinationResourceGroup `
         -Location $DestinationLocation
 }
 
-# ----------------------------
-# Move Resources
-# ----------------------------
+# ---------------------------------------------------
+# Perform Move
+# ---------------------------------------------------
 Write-Host "Starting Move..."
+
 Move-AzResource `
     -ResourceId $resourcesToMove `
     -DestinationSubscriptionId $DestinationSubscriptionId `
     -DestinationResourceGroupName $DestinationResourceGroup `
-    -Force
+    -Force `
+    -ErrorAction Stop
 
-Write-Host "Move Completed."
+Write-Host "Move Completed Successfully."
 
-# ----------------------------
-# Reattach Public IP (Destination Context)
-# ----------------------------
+# ---------------------------------------------------
+# Reattach Public IP (Destination)
+# ---------------------------------------------------
+if ($publicIpObject) {
 
-Set-AzContext -SubscriptionId $DestinationSubscriptionId
-
-$nic = Get-AzNetworkInterface -Name $vm.NetworkProfile.NetworkInterfaces[0].Id.Split("/")[-1] -ResourceGroupName $DestinationResourceGroup
-$publicIp = Get-AzPublicIpAddress -Name $publicIp.Name -ResourceGroupName $DestinationResourceGroup
-
-if ($publicIp) {
     Write-Host "Reattaching Public IP..."
+
+    $nicName = $vm.NetworkProfile.NetworkInterfaces[0].Id.Split("/")[-1]
+
+    $nic = Get-AzNetworkInterface `
+        -Name $nicName `
+        -ResourceGroupName $DestinationResourceGroup
+
+    $publicIp = Get-AzPublicIpAddress `
+        -Name $publicIpObject.Name `
+        -ResourceGroupName $DestinationResourceGroup
+
     $nic.IpConfigurations[0].PublicIpAddress = $publicIp
     Set-AzNetworkInterface -NetworkInterface $nic
 }
 
+# ---------------------------------------------------
 # Start VM
+# ---------------------------------------------------
+Write-Host "Starting VM..."
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
 
 Write-Host "==========================================="
