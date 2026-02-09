@@ -19,24 +19,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout repo
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Azure Login
       - name: Azure Login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
           enable-AzPSSession: true
 
-      # Install Az PowerShell
       - name: Install Az Module
         shell: pwsh
         run: |
           Install-Module Az -Force -AllowClobber -Scope CurrentUser
 
-      # Run Selected Phase
       - name: Execute Selected Phase
         shell: pwsh
         run: |
@@ -60,4 +56,9 @@ jobs:
               ./scripts/phase3-restore-backup.ps1
           }
 
-          Write-Host "Workflow execution completed."
+      - name: Upload Backup Artifact
+        if: ${{ github.event.inputs.phase == 'phase0' || github.event.inputs.phase == 'full' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-backup
+          path: backup-config.json
