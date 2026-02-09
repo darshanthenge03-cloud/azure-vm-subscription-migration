@@ -1,71 +1,25 @@
+. "$PSScriptRoot/config.ps1"
+
 $ErrorActionPreference = "Stop"
 
-Import-Module Az.Accounts -Force
-Import-Module Az.RecoveryServices -Force
+Write-Host "==========================================="
+Write-Host "PHASE 3: POST-MIGRATION VALIDATION"
+Write-Host "==========================================="
 
-# INPUT
-$DestinationSubscriptionId = "d4e068bf-2473-4201-b10a-7f8501d50ebc"
-$DestinationResourceGroup  = "Dev-RG"
-$VMName = "ubuntu"
-
+# Switch to Destination
+Write-Host "Switching to Destination Subscription..."
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
-$configPath = Join-Path $env:GITHUB_WORKSPACE "backup-config.json"
+# Verify VM exists
+$vm = Get-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup -ErrorAction Stop
 
-if (-not (Test-Path $configPath)) {
-    throw "backup-config.json not found"
+if (-not $vm) {
+    throw "VM not found in destination subscription."
 }
 
-$config = Get-Content $configPath | ConvertFrom-Json
+Write-Host "VM Verified in Destination."
+Write-Host "Location: $($vm.Location)"
+Write-Host "Resource Group: $($vm.ResourceGroupName)"
 
-# Create vault hear is name of vauult
-$vault = Get-AzRecoveryServicesVault -Name $config.VaultName -ErrorAction SilentlyContinue
-
-if (-not $vault) {
-    $vault = New-AzRecoveryServicesVault `
-        -Name $config.VaultName `
-        -ResourceGroupName $DestinationResourceGroup `
-        -Location $config.Location
-}
-
-Set-AzRecoveryServicesVaultContext -Vault $vault
-
-# Create policy cleanly
-$policy = Get-AzRecoveryServicesBackupProtectionPolicy `
-    -Name $config.PolicyName -ErrorAction SilentlyContinue
-
-if (-not $policy) {
-
-    $schedule = New-AzRecoveryServicesBackupSchedulePolicyObject `
-        -WorkloadType AzureVM
-
-    $schedule.ScheduleRunFrequency = "Daily"
-    $schedule.ScheduleRunTimes = @([DateTime]::Parse($config.BackupTime))
-
-    $retention = New-AzRecoveryServicesBackupRetentionPolicyObject `
-        -WorkloadType AzureVM
-
-    $retention.DailyRetention.DurationCountInDays = $config.RetentionDays
-
-    $policy = New-AzRecoveryServicesBackupProtectionPolicy `
-        -Name $config.PolicyName `
-        -WorkloadType AzureVM `
-        -RetentionPolicy $retention `
-        -SchedulePolicy $schedule
-}
-
-# Enable backup
-Enable-AzRecoveryServicesBackupProtection `
-    -Policy $policy `
-    -Name $VMName `
-    -ResourceGroupName $DestinationResourceGroup
-
-# Trigger initial backup
-$item = Get-AzRecoveryServicesBackupItem `
-    -WorkloadType AzureVM `
-    -BackupManagementType AzureVM |
-    Where-Object { $_.FriendlyName -eq $VMName }
-
-Backup-AzRecoveryServicesBackupItem -Item $item
-
-Write-Host "Backup restored and initial backup triggered."
+Write-Host "Post-migration validation successful."
+Write-Host "==========================================="
