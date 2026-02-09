@@ -126,6 +126,7 @@ Move-AzResource `
     -ResourceId $resourcesToMove `
     -DestinationSubscriptionId $DestinationSubscriptionId `
     -DestinationResourceGroupName $DestinationResourceGroup `
+    -Force `
     -ErrorAction Stop
 
 Write-Host "Migration Completed Successfully."
