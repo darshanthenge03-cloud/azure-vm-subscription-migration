@@ -5,9 +5,10 @@ $ErrorActionPreference = "Stop"
 Import-Module Az.Accounts -Force
 Import-Module Az.RecoveryServices -Force
 
+Write-Host "========== PHASE 0: EXPORT BACKUP =========="
+
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-Write-Host "========== PHASE 0: EXPORT BACKUP =========="
 Write-Host "Searching vault protecting VM: $VMName"
 
 $vaults = Get-AzRecoveryServicesVault
@@ -19,23 +20,32 @@ foreach ($vault in $vaults) {
     Write-Host "Checking Vault: $($vault.Name)"
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
-    $item = Get-AzRecoveryServicesBackupItem `
+    # NEW way (Enhanced compatible)
+    $items = Get-AzRecoveryServicesBackupItem `
         -WorkloadType AzureVM `
-        -BackupManagementType AzureVM `
-        -ErrorAction SilentlyContinue |
-        Where-Object { $_.FriendlyName -eq $VMName }
+        -ErrorAction SilentlyContinue
 
-    if ($item) {
-        $selectedVault = $vault
-        $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
-            -Name $item.ProtectionPolicyName
-        break
+    foreach ($item in $items) {
+
+        Write-Host "Found protected VM: $($item.FriendlyName)"
+
+        if ($item.FriendlyName -eq $VMName) {
+            $selectedVault = $vault
+            $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
+                -Name $item.ProtectionPolicyName
+            break
+        }
     }
+
+    if ($selectedVault) { break }
 }
 
 if (-not $selectedVault) {
     throw "No Recovery Vault found protecting VM '$VMName'"
 }
+
+Write-Host "Vault Found: $($selectedVault.Name)"
+Write-Host "Policy Found: $($policy.Name)"
 
 $retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
 $backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
