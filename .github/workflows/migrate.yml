@@ -19,46 +19,79 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ---------------------------------------
+      # Checkout
+      # ---------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # ---------------------------------------
+      # Azure Login
+      # ---------------------------------------
       - name: Azure Login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
           enable-AzPSSession: true
 
+      # ---------------------------------------
+      # Install Az Module
+      # ---------------------------------------
       - name: Install Az Module
         shell: pwsh
         run: |
           Install-Module Az -Force -AllowClobber -Scope CurrentUser
 
-      - name: Execute Selected Phase
+      # ---------------------------------------
+      # Phase 0
+      # ---------------------------------------
+      - name: Execute Phase 0
+        if: ${{ github.event.inputs.phase == 'phase0' || github.event.inputs.phase == 'full' }}
         shell: pwsh
         run: |
-          $phase = "${{ github.event.inputs.phase }}"
+          ./scripts/phase0-export-backup.ps1
 
-          Write-Host "Selected Phase: $phase"
-
-          if ($phase -eq "phase0" -or $phase -eq "full") {
-              ./scripts/phase0-export-backup.ps1
-          }
-
-          if ($phase -eq "phase1" -or $phase -eq "full") {
-              ./scripts/phase1-pre-migration.ps1
-          }
-
-          if ($phase -eq "phase2" -or $phase -eq "full") {
-              ./scripts/phase2-migrate.ps1
-          }
-
-          if ($phase -eq "phase3" -or $phase -eq "full") {
-              ./scripts/phase3-restore-backup.ps1
-          }
-
+      # Upload Backup Config After Phase 0
       - name: Upload Backup Artifact
         if: ${{ github.event.inputs.phase == 'phase0' || github.event.inputs.phase == 'full' }}
         uses: actions/upload-artifact@v4
         with:
-          name: vm-backup
+          name: backup-config
           path: backup-config.json
+
+      # ---------------------------------------
+      # Phase 1
+      # ---------------------------------------
+      - name: Execute Phase 1
+        if: ${{ github.event.inputs.phase == 'phase1' || github.event.inputs.phase == 'full' }}
+        shell: pwsh
+        run: |
+          ./scripts/phase1-pre-migration.ps1
+
+      # ---------------------------------------
+      # Phase 2
+      # ---------------------------------------
+      - name: Execute Phase 2
+        if: ${{ github.event.inputs.phase == 'phase2' || github.event.inputs.phase == 'full' }}
+        shell: pwsh
+        run: |
+          ./scripts/phase2-migrate.ps1
+
+      # ---------------------------------------
+      # Download Backup Config Before Phase 3
+      # ---------------------------------------
+      - name: Download Backup Artifact
+        if: ${{ github.event.inputs.phase == 'phase3' || github.event.inputs.phase == 'full' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: backup-config
+          path: .
+
+      # ---------------------------------------
+      # Phase 3
+      # ---------------------------------------
+      - name: Execute Phase 3
+        if: ${{ github.event.inputs.phase == 'phase3' || github.event.inputs.phase == 'full' }}
+        shell: pwsh
+        run: |
+          ./scripts/phase3-restore-backup.ps1
