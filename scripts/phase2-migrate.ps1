@@ -1,172 +1,76 @@
+. "$PSScriptRoot/config.ps1"
+
 $ErrorActionPreference = "Stop"
 
-# ==========================================================
-# ENSURE REQUIRED MODULES
-# ==========================================================
-$modules = @(
-    "Az.Accounts",
-    "Az.Compute",
-    "Az.Network",
-    "Az.Resources"
-)
+Write-Host "==========================================="
+Write-Host "PHASE 2: MIGRATION STARTED"
+Write-Host "==========================================="
 
-foreach ($m in $modules) {
-    if (-not (Get-Module -ListAvailable -Name $m)) {
-        Install-Module $m -Force -Scope CurrentUser -AllowClobber
-    }
-    Import-Module $m -Force
+# ---------------------------
+# Switch to Source
+# ---------------------------
+Write-Host "Switching to Source Subscription..."
+Set-AzContext -SubscriptionId $SourceSubscriptionId
+
+$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
+
+if (-not $vm) {
+    throw "VM not found in source subscription."
 }
 
-# ==========================================================
-# USER INPUT
-# ==========================================================
-$SourceSubscriptionId      = "46689057-be43-4229-9241-e0591dad4dbf"
-$DestinationSubscriptionId = "d4e068bf-2473-4201-b10a-7f8501d50ebc"
+Write-Host "VM Found: $($vm.Name)"
 
-$SourceResourceGroup       = "Dev-RG"
-$DestinationResourceGroup  = "Dev-RG"
-$DestinationLocation       = "centralindia"
+# ---------------------------
+# Collect Resources
+# ---------------------------
+$resourcesToMove = @()
 
-$VMName = "ubuntu"
+# VM
+$resourcesToMove += $vm.Id
 
-Write-Host "================================================="
-Write-Host " AZURE VM SUBSCRIPTION MIGRATION (PHASE 2)"
-Write-Host "================================================="
+# OS Disk
+$resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
 
-# ==========================================================
-# SET SOURCE CONTEXT
-# ==========================================================
-Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
-Write-Host "[OK] Source subscription set"
-
-$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup
-Write-Host "[OK] VM found"
-
-$resourceIds = @()
-$NicPipMap   = @{}
-
-# ==========================================================
-# COMPUTE DEPENDENCIES
-# ==========================================================
-$resourceIds += $vm.Id
-$resourceIds += $vm.StorageProfile.OsDisk.ManagedDisk.Id
-
+# Data Disks
 foreach ($disk in $vm.StorageProfile.DataDisks) {
-    $resourceIds += $disk.ManagedDisk.Id
+    $resourcesToMove += $disk.ManagedDisk.Id
 }
 
-# ==========================================================
-# NETWORK DEPENDENCIES
-# ==========================================================
-foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
-
-    $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
-    $resourceIds += $nic.Id
-
-    # VNet
-    $subnetId = $nic.IpConfigurations[0].Subnet.Id
-    $vnetId   = ($subnetId -replace "/subnets/.*","")
-
-    if ($resourceIds -notcontains $vnetId) {
-        $resourceIds += $vnetId
-    }
-
-    # NSG
-    if ($nic.NetworkSecurityGroup) {
-        $resourceIds += $nic.NetworkSecurityGroup.Id
-    }
-
-    # Save mapping for reattach
-    $NicPipMap[$nic.Name] = @{
-        IpConfigName = $nic.IpConfigurations[0].Name
-    }
+# NICs
+foreach ($nic in $vm.NetworkProfile.NetworkInterfaces) {
+    $resourcesToMove += $nic.Id
 }
 
-# Public IP
-$pips = Get-AzPublicIpAddress -ResourceGroupName $SourceResourceGroup -ErrorAction SilentlyContinue
-foreach ($pip in $pips) {
-    $resourceIds += $pip.Id
-    $primaryNic = $NicPipMap.Keys | Select-Object -First 1
-    $NicPipMap[$primaryNic]["PipName"] = $pip.Name
-}
+Write-Host "Resources to move:"
+$resourcesToMove | ForEach-Object { Write-Host $_ }
 
-Write-Host "[INFO] Final resources to move:"
-$resourceIds | ForEach-Object { Write-Host $_ }
+# ---------------------------
+# Switch to Destination
+# ---------------------------
+Write-Host "Switching to Destination Subscription..."
+Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
-# ==========================================================
-# ENSURE DESTINATION RG EXISTS
-# ==========================================================
-Set-AzContext -SubscriptionId $DestinationSubscriptionId | Out-Null
+# ---------------------------
+# Auto Create Destination RG
+# ---------------------------
+$destRG = Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue
 
-if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
-
-    Write-Host "[ACTION] Creating destination RG..."
+if (-not $destRG) {
+    Write-Host "Creating Destination Resource Group..."
     New-AzResourceGroup `
         -Name $DestinationResourceGroup `
-        -Location $DestinationLocation | Out-Null
-
-    Write-Host "[OK] Destination RG created"
-}
-else {
-    Write-Host "[OK] Destination RG exists"
+        -Location $DestinationLocation
 }
 
-# ==========================================================
-# MOVE RESOURCES (THIS DOES VALIDATION INTERNALLY)
-# ==========================================================
-Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
-
-Write-Host ""
-Write-Host "[ACTION] Moving resources..."
+# ---------------------------
+# Perform Move
+# ---------------------------
+Write-Host "Starting Resource Move..."
 
 Move-AzResource `
-    -ResourceId $resourceIds `
+    -ResourceId $resourcesToMove `
     -DestinationSubscriptionId $DestinationSubscriptionId `
-    -DestinationResourceGroupName $DestinationResourceGroup `
-    -Force
+    -DestinationResourceGroupName $DestinationResourceGroup
 
-Write-Host "[OK] Move completed"
-
-# ==========================================================
-# SWITCH TO DESTINATION
-# ==========================================================
-Set-AzContext -SubscriptionId $DestinationSubscriptionId | Out-Null
-
-# ==========================================================
-# REATTACH PUBLIC IP
-# ==========================================================
-Write-Host "[ACTION] Reattaching Public IP..."
-
-foreach ($nicName in $NicPipMap.Keys) {
-
-    $pipName      = $NicPipMap[$nicName]["PipName"]
-    $ipConfigName = $NicPipMap[$nicName]["IpConfigName"]
-
-    if (-not $pipName) { continue }
-
-    $nic = Get-AzNetworkInterface -Name $nicName -ResourceGroupName $DestinationResourceGroup
-    $pip = Get-AzPublicIpAddress -Name $pipName -ResourceGroupName $DestinationResourceGroup
-
-    Set-AzNetworkInterfaceIpConfig `
-        -NetworkInterface $nic `
-        -Name $ipConfigName `
-        -PublicIpAddress $pip | Out-Null
-
-    Set-AzNetworkInterface -NetworkInterface $nic | Out-Null
-
-    Write-Host "[OK] Public IP reattached"
-}
-
-# ==========================================================
-# START VM
-# ==========================================================
-Write-Host "[ACTION] Starting VM..."
-Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup | Out-Null
-
-Write-Host ""
-Write-Host "================================================="
-Write-Host " MIGRATION COMPLETED SUCCESSFULLY"
-Write-Host " VM moved"
-Write-Host " Public IP reattached"
-Write-Host " VM running"
-Write-Host "================================================="
+Write-Host "Migration Completed Successfully."
+Write-Host "==========================================="
