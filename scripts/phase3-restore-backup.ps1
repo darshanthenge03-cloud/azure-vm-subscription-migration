@@ -10,32 +10,48 @@ $VMName = "ubuntu"
 
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
-# Read exported config
-$config = Get-Content "./backup-config.json" | ConvertFrom-Json
+$configPath = Join-Path $env:GITHUB_WORKSPACE "backup-config.json"
 
-# Create vault
+if (-not (Test-Path $configPath)) {
+    throw "backup-config.json not found"
+}
+
+$config = Get-Content $configPath | ConvertFrom-Json
+
+# Create vault hear is name of vauult
 $vault = Get-AzRecoveryServicesVault -Name $config.VaultName -ErrorAction SilentlyContinue
 
 if (-not $vault) {
     $vault = New-AzRecoveryServicesVault `
         -Name $config.VaultName `
         -ResourceGroupName $DestinationResourceGroup `
-        -Location $config.VaultLocation
+        -Location $config.Location
 }
 
 Set-AzRecoveryServicesVaultContext -Vault $vault
 
-# Create policy
+# Create policy cleanly
 $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
     -Name $config.PolicyName -ErrorAction SilentlyContinue
 
 if (-not $policy) {
 
+    $schedule = New-AzRecoveryServicesBackupSchedulePolicyObject `
+        -WorkloadType AzureVM
+
+    $schedule.ScheduleRunFrequency = "Daily"
+    $schedule.ScheduleRunTimes = @([DateTime]::Parse($config.BackupTime))
+
+    $retention = New-AzRecoveryServicesBackupRetentionPolicyObject `
+        -WorkloadType AzureVM
+
+    $retention.DailyRetention.DurationCountInDays = $config.RetentionDays
+
     $policy = New-AzRecoveryServicesBackupProtectionPolicy `
         -Name $config.PolicyName `
         -WorkloadType AzureVM `
-        -SchedulePolicy $config.Schedule `
-        -RetentionPolicy $config.Retention
+        -RetentionPolicy $retention `
+        -SchedulePolicy $schedule
 }
 
 # Enable backup
@@ -52,4 +68,4 @@ $item = Get-AzRecoveryServicesBackupItem `
 
 Backup-AzRecoveryServicesBackupItem -Item $item
 
-Write-Host "Backup restored successfully."
+Write-Host "Backup restored and initial backup triggered."
