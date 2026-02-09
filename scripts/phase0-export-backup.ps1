@@ -7,19 +7,23 @@ Import-Module Az.RecoveryServices -Force
 
 Write-Host "========== PHASE 0: EXPORT BACKUP =========="
 
-# Switch to Source Subscription
+# Set subscription context
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
 Write-Host "Using Recovery Vault: $VaultName"
 
-# Get Vault
-$vault = Get-AzRecoveryServicesVault -Name $VaultName
+# Get vault
+$vault = Get-AzRecoveryServicesVault -Name $VaultName -ErrorAction Stop
 Set-AzRecoveryServicesVaultContext -Vault $vault
 
-# Get all containers (compatible with older Az versions)
-$containers = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM
+# Get containers (compatible with old + new Az modules)
+$containers = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM -ErrorAction SilentlyContinue
 
-# Find container matching VM
+if (-not $containers) {
+    throw "No backup containers found in vault '$VaultName'"
+}
+
+# Match container by VM name
 $container = $containers | Where-Object {
     $_.FriendlyName -eq $VMName
 }
@@ -28,25 +32,51 @@ if (-not $container) {
     throw "Backup container not found for VM '$VMName'"
 }
 
-# Get backup item from container
+# Get backup item
 $backupItem = Get-AzRecoveryServicesBackupItem `
     -Container $container `
-    -WorkloadType AzureVM
+    -WorkloadType AzureVM `
+    -ErrorAction Stop
 
 if (-not $backupItem) {
     throw "Backup item not found for VM '$VMName'"
 }
 
-# Get backup policy
+# Get policy
 $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
-    -Name $backupItem.ProtectionPolicyName
+    -Name $backupItem.ProtectionPolicyName `
+    -ErrorAction Stop
 
 Write-Host "Vault Found: $($vault.Name)"
 Write-Host "Policy Found: $($policy.Name)"
 
-# Extract values
-$retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
-$backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
+# -------------------------------
+# UNIVERSAL POLICY PARSING LOGIC
+# -------------------------------
+
+$retentionDays = "Unknown"
+$backupTime = "Unknown"
+
+# Handle Standard Policy
+if ($policy.RetentionPolicy -and $policy.RetentionPolicy.DailyRetention) {
+    $retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
+}
+
+if ($policy.SchedulePolicy -and $policy.SchedulePolicy.ScheduleRunTimes) {
+    try {
+        $backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
+    }
+    catch {
+        $backupTime = "Configured (Standard Policy)"
+    }
+}
+
+# Handle Enhanced Policy (Snapshot-based)
+if (-not $policy.SchedulePolicy.ScheduleRunTimes) {
+    $backupTime = "Enhanced Policy (Snapshot-based)"
+}
+
+# -------------------------------
 
 $export = @{
     VaultName     = $vault.Name
