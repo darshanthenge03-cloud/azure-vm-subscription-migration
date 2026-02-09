@@ -6,6 +6,7 @@ Import-Module Az.Accounts -Force
 Import-Module Az.Compute -Force
 Import-Module Az.Network -Force
 Import-Module Az.Resources -Force
+Import-Module Az.RecoveryServices -Force
 
 Write-Host "==========================================="
 Write-Host "PHASE 2: FULL STACK MIGRATION"
@@ -18,11 +19,77 @@ Set-AzContext -SubscriptionId $SourceSubscriptionId
 
 $vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
 
+# ---------------------------------------------------
+# STEP 1 - Disable Backup (REMOVE Recovery Points)
+# ---------------------------------------------------
+Write-Host "Checking backup protection..."
+
+$vault = Get-AzRecoveryServicesVault -Name $VaultName -ErrorAction SilentlyContinue
+
+if ($vault) {
+
+    Set-AzRecoveryServicesVaultContext -Vault $vault
+
+    $container = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM |
+        Where-Object { $_.FriendlyName -eq $VMName }
+
+    if ($container) {
+
+        $item = Get-AzRecoveryServicesBackupItem `
+            -Container $container `
+            -WorkloadType AzureVM `
+            -ErrorAction SilentlyContinue
+
+        if ($item) {
+
+            Write-Host "Disabling backup protection and removing recovery points..."
+
+            Disable-AzRecoveryServicesBackupProtection `
+                -Item $item `
+                -RemoveRecoveryPoints `
+                -Force
+
+            Write-Host "Waiting for backup protection removal..."
+
+            $maxAttempts = 12
+            $attempt = 0
+
+            do {
+                Start-Sleep -Seconds 15
+                $attempt++
+
+                $containerCheck = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM |
+                    Where-Object { $_.FriendlyName -eq $VMName }
+
+                $itemCheck = $null
+                if ($containerCheck) {
+                    $itemCheck = Get-AzRecoveryServicesBackupItem `
+                        -Container $containerCheck `
+                        -WorkloadType AzureVM `
+                        -ErrorAction SilentlyContinue
+                }
+
+                Write-Host "Checking protection state... Attempt $attempt"
+
+            } while ($itemCheck -and $attempt -lt $maxAttempts)
+
+            if ($itemCheck) {
+                throw "Backup protection still active. Aborting migration."
+            }
+
+            Write-Host "Backup protection removed successfully."
+        }
+    }
+}
+
+# ---------------------------------------------------
+# STEP 2 - Stop VM
+# ---------------------------------------------------
 Write-Host "Stopping VM..."
 Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
 # ---------------------------------------------------
-# Collect Resources
+# STEP 3 - Collect Resources
 # ---------------------------------------------------
 $resourcesToMove = @()
 $publicIpObject = $null
@@ -32,7 +99,6 @@ $resourcesToMove += $vm.Id
 
 # Disks
 $resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
-
 foreach ($disk in $vm.StorageProfile.DataDisks) {
     if ($disk.ManagedDisk) {
         $resourcesToMove += $disk.ManagedDisk.Id
@@ -47,9 +113,7 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     foreach ($ipconfig in $nic.IpConfigurations) {
 
-        # ---------------------------
-        # Handle Public IP (Version Safe)
-        # ---------------------------
+        # Public IP
         if ($ipconfig.PublicIpAddress) {
 
             $publicIpId   = $ipconfig.PublicIpAddress.Id
@@ -62,25 +126,21 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
             $resourcesToMove += $publicIpObject.Id
 
-            # Disassociate Public IP
             Write-Host "Disassociating Public IP..."
             $ipconfig.PublicIpAddress = $null
             Set-AzNetworkInterface -NetworkInterface $nic
         }
 
-        # ---------------------------
-        # Subnet + VNet
-        # ---------------------------
+        # VNet + Subnet
         $subnetId = $ipconfig.Subnet.Id
         $vnetName = $subnetId.Split("/")[8]
-        $subnetName = $subnetId.Split("/")[-1]
-        $vnetRG = $subnetId.Split("/")[4]
+        $vnetRG   = $subnetId.Split("/")[4]
 
         $vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $vnetRG
-
         $resourcesToMove += $vnet.Id
 
-        # Route Table (if attached)
+        # Route Table
+        $subnetName = $subnetId.Split("/")[-1]
         $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $subnetName }
 
         if ($subnet.RouteTable) {
@@ -94,20 +154,16 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
     }
 }
 
-# Remove duplicates
 $resourcesToMove = $resourcesToMove | Select-Object -Unique
 
-Write-Host "-------------------------------------------"
 Write-Host "Resources to Move:"
 $resourcesToMove | ForEach-Object { Write-Host $_ }
-Write-Host "-------------------------------------------"
 
 # ---------------------------------------------------
-# Switch to Destination Subscription
+# STEP 4 - Switch to Destination
 # ---------------------------------------------------
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
-# Create Destination RG if needed
 if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
     Write-Host "Creating Destination Resource Group..."
     New-AzResourceGroup `
@@ -116,7 +172,7 @@ if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction Silen
 }
 
 # ---------------------------------------------------
-# Perform Move
+# STEP 5 - Perform Move
 # ---------------------------------------------------
 Write-Host "Starting Move..."
 
@@ -130,7 +186,7 @@ Move-AzResource `
 Write-Host "Move Completed Successfully."
 
 # ---------------------------------------------------
-# Reattach Public IP (Destination)
+# STEP 6 - Reattach Public IP
 # ---------------------------------------------------
 if ($publicIpObject) {
 
@@ -151,7 +207,7 @@ if ($publicIpObject) {
 }
 
 # ---------------------------------------------------
-# Start VM
+# STEP 7 - Start VM
 # ---------------------------------------------------
 Write-Host "Starting VM..."
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
