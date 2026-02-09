@@ -2,25 +2,58 @@
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "========== PHASE 0: EXPORT BACKUP =========="
+Import-Module Az.Accounts -Force
+Import-Module Az.RecoveryServices -Force
+
+# Variables now coming from config.ps1:
+# $SourceSubscriptionId
+# $VMName
 
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
+Write-Host "Searching vault protecting VM: $VMName"
 
-if (-not $vm) {
-    throw "VM not found."
+$vaults = Get-AzRecoveryServicesVault
+$selectedVault = $null
+$policy = $null
+
+foreach ($vault in $vaults) {
+
+    Set-AzRecoveryServicesVaultContext -Vault $vault
+
+    $item = Get-AzRecoveryServicesBackupItem `
+        -WorkloadType AzureVM `
+        -BackupManagementType AzureVM `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.FriendlyName -eq $VMName }
+
+    if ($item) {
+        $selectedVault = $vault
+        $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
+            -Name $item.ProtectionPolicyName
+        break
+    }
 }
 
-# Create backup folder
-$backupFolder = "$PSScriptRoot/backup"
-if (-not (Test-Path $backupFolder)) {
-    New-Item -ItemType Directory -Path $backupFolder | Out-Null
+if (-not $selectedVault) {
+    throw "No Recovery Vault found protecting VM '$VMName'"
 }
 
-$backupFile = "$backupFolder/backup-config-$($VMName).json"
+# Extract simple values only
+$retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
+$backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
 
-$vm | ConvertTo-Json -Depth 20 | Out-File $backupFile -Force
+$export = @{
+    VaultName     = $selectedVault.Name
+    Location      = $selectedVault.Location
+    PolicyName    = $policy.Name
+    RetentionDays = $retentionDays
+    BackupTime    = $backupTime
+}
 
-Write-Host "Backup saved at $backupFile"
-Write-Host "========== PHASE 0 COMPLETED =========="
+# Save to workspace root so artifact can upload it
+$path = Join-Path $env:GITHUB_WORKSPACE "backup-config.json"
+
+$export | ConvertTo-Json -Depth 5 | Out-File $path -Force
+
+Write-Host "Backup config exported to: $path"
