@@ -12,4 +12,4 @@ $backupFile = "backup-config-$($VMName).json"
 
 $vm | ConvertTo-Json -Depth 20 | Out-File $backupFile -Force
 
-Write-Host "Backup completed."
+Write-Host "Backup export completed."
