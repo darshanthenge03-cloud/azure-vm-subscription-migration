@@ -1,56 +1,43 @@
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$SourceSubscriptionId,
+
+    [Parameter(Mandatory=$true)]
+    [string]$VMName
+)
+
 $ErrorActionPreference = "Stop"
 
-Import-Module Az.Accounts -Force
-Import-Module Az.RecoveryServices -Force
+Write-Host "==========================================="
+Write-Host "PHASE 0: EXPORT VM CONFIGURATION BACKUP"
+Write-Host "==========================================="
 
-# INPUT
-$SourceSubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
-$VMName = "ubuntu"
-
+# Switch to Source Subscription
+Write-Host "Setting Azure context to Source Subscription..."
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-Write-Host "Searching vault protecting VM: $VMName"
+# Get VM
+Write-Host "Fetching VM details..."
+$vm = Get-AzVM -Name $VMName -ErrorAction Stop
 
-$vaults = Get-AzRecoveryServicesVault
-$selectedVault = $null
-$policy = $null
-
-foreach ($vault in $vaults) {
-
-    Set-AzRecoveryServicesVaultContext -Vault $vault
-
-    $item = Get-AzRecoveryServicesBackupItem `
-        -WorkloadType AzureVM `
-        -BackupManagementType AzureVM `
-        -ErrorAction SilentlyContinue |
-        Where-Object { $_.FriendlyName -eq $VMName }
-
-    if ($item) {
-        $selectedVault = $vault
-        $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
-            -Name $item.ProtectionPolicyName
-        break
-    }
+if (-not $vm) {
+    throw "VM '$VMName' not found in subscription '$SourceSubscriptionId'."
 }
 
-if (-not $selectedVault) {
-    throw "No Recovery Vault found protecting VM '$VMName'"
-}
+Write-Host "VM Found: $($vm.Name)"
+Write-Host "Resource Group: $($vm.ResourceGroupName)"
+Write-Host "Location: $($vm.Location)"
 
-# Extract simple values only
-$retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
-$backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
+# Export VM configuration
+$backupFile = "backup-config-$($VMName).json"
 
-$export = @{
-    VaultName     = $selectedVault.Name
-    Location      = $selectedVault.Location
-    PolicyName    = $policy.Name
-    RetentionDays = $retentionDays
-    BackupTime    = $backupTime
-}
+Write-Host "Exporting VM configuration to $backupFile ..."
 
-$path = Join-Path $env:GITHUB_WORKSPACE "backup-config.json"
+$vm | ConvertTo-Json -Depth 20 | Out-File $backupFile -Force
 
-$export | ConvertTo-Json -Depth 5 | Out-File $path -Force
+Write-Host "Backup export completed successfully."
+Write-Host "File saved as: $backupFile"
 
-Write-Host "Backup config exported to: $path"
+Write-Host "==========================================="
+Write-Host "PHASE 0 COMPLETED SUCCESSFULLY"
+Write-Host "==========================================="
