@@ -3,79 +3,54 @@ $ErrorActionPreference = "Stop"
 Import-Module Az.Accounts -Force
 Import-Module Az.RecoveryServices -Force
 
-Write-Host "==============================================="
-Write-Host "PHASE 0 - EXPORT BACKUP CONFIGURATION"
-Write-Host "==============================================="
-
 # INPUT
 $SourceSubscriptionId = "46689057-be43-4229-9241-e0591dad4dbf"
-$VMName               = "ubuntu"
+$VMName = "ubuntu"
 
-Set-AzContext -SubscriptionId $SourceSubscriptionId | Out-Null
-Write-Host "[OK] Connected to subscription"
+Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-$vaultFound = $null
-$backupItem = $null
+Write-Host "Searching vault protecting VM: $VMName"
 
 $vaults = Get-AzRecoveryServicesVault
+$selectedVault = $null
+$policy = $null
 
 foreach ($vault in $vaults) {
 
-    Write-Host "Checking vault:" $vault.Name
-
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
-    # Get container for VM
-    $container = Get-AzRecoveryServicesBackupContainer `
-        -ContainerType AzureVM `
-        -FriendlyName $VMName `
-        -ErrorAction SilentlyContinue
+    $item = Get-AzRecoveryServicesBackupItem `
+        -WorkloadType AzureVM `
+        -BackupManagementType AzureVM `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.FriendlyName -eq $VMName }
 
-    if ($container) {
-
-        $item = Get-AzRecoveryServicesBackupItem `
-            -Container $container `
-            -WorkloadType AzureVM `
-            -ErrorAction SilentlyContinue
-
-        if ($item) {
-
-            $vaultFound = $vault
-            $backupItem = $item
-            break
-        }
+    if ($item) {
+        $selectedVault = $vault
+        $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
+            -Name $item.ProtectionPolicyName
+        break
     }
 }
 
-if (-not $vaultFound) {
-    throw "No Recovery Services Vault found protecting VM '$VMName'"
+if (-not $selectedVault) {
+    throw "No Recovery Vault found protecting VM '$VMName'"
 }
 
-Write-Host "[OK] Vault Found:" $vaultFound.Name
-Write-Host "[OK] Backup Item Found"
+# Extract simple values only
+$retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
+$backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
 
-$policy = Get-AzRecoveryServicesBackupProtectionPolicy `
-    -Name $backupItem.ProtectionPolicyName
-
-Write-Host "[OK] Policy Found:" $policy.Name
-
-# Export object
-$export = [PSCustomObject]@{
-    VaultName     = $vaultFound.Name
-    VaultLocation = $vaultFound.Location
+$export = @{
+    VaultName     = $selectedVault.Name
+    Location      = $selectedVault.Location
     PolicyName    = $policy.Name
-    Schedule      = $policy.SchedulePolicy
-    Retention     = $policy.RetentionPolicy
+    RetentionDays = $retentionDays
+    BackupTime    = $backupTime
 }
 
-$workspace = $env:GITHUB_WORKSPACE
-$path = Join-Path $workspace "backup-config.json"
+$path = Join-Path $env:GITHUB_WORKSPACE "backup-config.json"
 
-$export | ConvertTo-Json -Depth 20 | Out-File $path -Force
+$export | ConvertTo-Json -Depth 5 | Out-File $path -Force
 
-Write-Host ""
-Write-Host "Backup configuration exported to:"
-Write-Host $path
-
-Write-Host "Files in workspace:"
-Get-ChildItem $workspace
+Write-Host "Backup config exported to: $path"
