@@ -1,12 +1,11 @@
----
 name: Azure VM Subscription Migration
+
 on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Select phase to run
+        description: Select phase
         required: true
-        default: phase1
         type: choice
         options:
           - phase0
@@ -14,54 +13,82 @@ on:
           - phase2
           - phase3
           - full
+
+      source_subscription:
+        description: Source Subscription ID
+        required: true
+
+      destination_subscription:
+        description: Destination Subscription ID
+        required: true
+
+      source_rg:
+        description: Source Resource Group
+        required: true
+
+      destination_rg:
+        description: Destination Resource Group
+        required: true
+
+      location:
+        description: Destination Location
+        required: true
+
+      vm_name:
+        description: VM Name
+        required: true
+
 jobs:
   migrate:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Azure Login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
           enable-AzPSSession: true
-      - name: Install Az PowerShell
+
+      - name: Install Az
+        shell: pwsh
+        run: Install-Module Az -Force -AllowClobber
+
+      - name: Run Phase 0
+        if: ${{ github.event.inputs.phase == 'phase0' || github.event.inputs.phase == 'full' }}
         shell: pwsh
         run: |
-          Install-Module Az -Force -AllowClobber
-          Install-Module Az.Accounts -Force -AllowClobber
-          Install-Module Az.Compute -Force -AllowClobber
-          Install-Module Az.Network -Force -AllowClobber
-          Install-Module Az.Resources -Force -AllowClobber
-      - name: Validate Azure Context
+          ./scripts/phase0-export-backup.ps1 `
+            -SourceSubscriptionId "${{ github.event.inputs.source_subscription }}" `
+            -VMName "${{ github.event.inputs.vm_name }}"
+
+      - name: Run Phase 1
+        if: ${{ github.event.inputs.phase == 'phase1' || github.event.inputs.phase == 'full' }}
         shell: pwsh
         run: |
-          Get-AzContext
-      - name: Run Phase 0 (Export Backup)
-        if: ${{ github.event.inputs.phase == 'phase0' || github.event.inputs.phase ==
-          'full' }}
+          ./scripts/phase1-pre-migration.ps1 `
+            -SourceSubscriptionId "${{ github.event.inputs.source_subscription }}" `
+            -SourceResourceGroup "${{ github.event.inputs.source_rg }}" `
+            -VMName "${{ github.event.inputs.vm_name }}"
+
+      - name: Run Phase 2
+        if: ${{ github.event.inputs.phase == 'phase2' || github.event.inputs.phase == 'full' }}
         shell: pwsh
         run: |
-          ./scripts/phase0-export-backup.ps1 
-      - name: Upload Backup Config Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backup-config
-          path: ${{ github.workspace }}/backup-config.json
-      - name: Run Phase 1 (Pre-Migration)
-        if: ${{ github.event.inputs.phase == 'phase1' || github.event.inputs.phase ==
-          'full' }}
+          ./scripts/phase2-migrate.ps1 `
+            -SourceSubscriptionId "${{ github.event.inputs.source_subscription }}" `
+            -DestinationSubscriptionId "${{ github.event.inputs.destination_subscription }}" `
+            -SourceResourceGroup "${{ github.event.inputs.source_rg }}" `
+            -DestinationResourceGroup "${{ github.event.inputs.destination_rg }}" `
+            -DestinationLocation "${{ github.event.inputs.location }}" `
+            -VMName "${{ github.event.inputs.vm_name }}"
+
+      - name: Run Phase 3
+        if: ${{ github.event.inputs.phase == 'phase3' || github.event.inputs.phase == 'full' }}
         shell: pwsh
         run: |
-          ./scripts/phase1-pre-migration.ps1
-      - name: Run Phase 2 (Migration)
-        if: ${{ github.event.inputs.phase == 'phase2' || github.event.inputs.phase ==
-          'full' }}
-        shell: pwsh
-        run: |
-          ./scripts/phase2-migrate.ps1
-      - name: Run Phase 3 (Restore Backup)
-        if: ${{ github.event.inputs.phase == 'phase3' || github.event.inputs.phase ==
-          'full' }}
-        shell: pwsh
-        run: |
-          ./scripts/phase3-restore-backup.ps1    
+          ./scripts/phase3-restore-backup.ps1 `
+            -DestinationSubscriptionId "${{ github.event.inputs.destination_subscription }}" `
+            -DestinationResourceGroup "${{ github.event.inputs.destination_rg }}" `
+            -VMName "${{ github.event.inputs.vm_name }}"
