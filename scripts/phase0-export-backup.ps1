@@ -10,20 +10,19 @@ Write-Host "========== PHASE 0: EXPORT BACKUP =========="
 # Switch to Source Subscription
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-# Vault name from portal
-$VaultName = "ubuntu-vault"
-
 Write-Host "Using Recovery Vault: $VaultName"
 
-# Get vault
+# Get Vault
 $vault = Get-AzRecoveryServicesVault -Name $VaultName
 Set-AzRecoveryServicesVaultContext -Vault $vault
 
-# Get container for this VM
-$container = Get-AzRecoveryServicesBackupContainer `
-    -ContainerType AzureVM `
-    -FriendlyName $VMName `
-    -Status Registered
+# Get all containers (compatible with older Az versions)
+$containers = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM
+
+# Find container matching VM
+$container = $containers | Where-Object {
+    $_.FriendlyName -eq $VMName
+}
 
 if (-not $container) {
     throw "Backup container not found for VM '$VMName'"
@@ -38,13 +37,14 @@ if (-not $backupItem) {
     throw "Backup item not found for VM '$VMName'"
 }
 
-# Get policy
+# Get backup policy
 $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
     -Name $backupItem.ProtectionPolicyName
 
 Write-Host "Vault Found: $($vault.Name)"
 Write-Host "Policy Found: $($policy.Name)"
 
+# Extract values
 $retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
 $backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
 
