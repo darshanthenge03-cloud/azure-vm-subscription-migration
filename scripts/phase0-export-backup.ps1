@@ -7,52 +7,39 @@ Import-Module Az.RecoveryServices -Force
 
 Write-Host "========== PHASE 0: EXPORT BACKUP =========="
 
+# Set correct subscription
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
-Write-Host "Searching vault protecting VM: $VMName"
+# Get VM backup item directly
+Write-Host "Getting backup item for VM: $VMName"
 
-$vaults = Get-AzRecoveryServicesVault
-$selectedVault = $null
-$policy = $null
+$backupItem = Get-AzRecoveryServicesBackupItem `
+    -WorkloadType AzureVM `
+    -Name $VMName `
+    -ErrorAction SilentlyContinue
 
-foreach ($vault in $vaults) {
-
-    Write-Host "Checking Vault: $($vault.Name)"
-    Set-AzRecoveryServicesVaultContext -Vault $vault
-
-    # NEW way (Enhanced compatible)
-    $items = Get-AzRecoveryServicesBackupItem `
-        -WorkloadType AzureVM `
-        -ErrorAction SilentlyContinue
-
-    foreach ($item in $items) {
-
-        Write-Host "Found protected VM: $($item.FriendlyName)"
-
-        if ($item.FriendlyName -eq $VMName) {
-            $selectedVault = $vault
-            $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
-                -Name $item.ProtectionPolicyName
-            break
-        }
-    }
-
-    if ($selectedVault) { break }
+if (-not $backupItem) {
+    throw "Backup item not found for VM '$VMName'"
 }
 
-if (-not $selectedVault) {
-    throw "No Recovery Vault found protecting VM '$VMName'"
-}
+# Get vault from backup item
+$vaultId = $backupItem.Id.Split("/")[8]
+$vault = Get-AzRecoveryServicesVault -Name $vaultId
 
-Write-Host "Vault Found: $($selectedVault.Name)"
+Set-AzRecoveryServicesVaultContext -Vault $vault
+
+$policy = Get-AzRecoveryServicesBackupProtectionPolicy `
+    -Name $backupItem.ProtectionPolicyName
+
+Write-Host "Vault Found: $($vault.Name)"
 Write-Host "Policy Found: $($policy.Name)"
 
 $retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
 $backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
 
 $export = @{
-    VaultName     = $selectedVault.Name
-    Location      = $selectedVault.Location
+    VaultName     = $vault.Name
+    Location      = $vault.Location
     PolicyName    = $policy.Name
     RetentionDays = $retentionDays
     BackupTime    = $backupTime
