@@ -7,12 +7,8 @@ Import-Module Az.RecoveryServices -Force
 
 Write-Host "========== PHASE 0: EXPORT BACKUP =========="
 
-# Ensure correct subscription
-Write-Host "Setting context to Source Subscription..."
+# Set correct subscription
 Set-AzContext -SubscriptionId $SourceSubscriptionId
-
-Write-Host "Current Context:"
-Get-AzContext
 
 Write-Host "Searching vault protecting VM: $VMName"
 
@@ -20,21 +16,25 @@ $vaults = Get-AzRecoveryServicesVault
 $selectedVault = $null
 $policy = $null
 
-if (-not $vaults) {
-    throw "No Recovery Services Vaults found in this subscription."
-}
-
 foreach ($vault in $vaults) {
 
     Write-Host "Checking Vault: $($vault.Name)"
-
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
-    $items = Get-AzRecoveryServicesBackupItem `
-        -WorkloadType AzureVM `
+    # Get all Azure VM backup containers
+    $containers = Get-AzRecoveryServicesBackupContainer `
+        -ContainerType AzureVM `
+        -Status Registered `
         -ErrorAction SilentlyContinue
 
-    if ($items) {
+    foreach ($container in $containers) {
+
+        # Get backup items from container
+        $items = Get-AzRecoveryServicesBackupItem `
+            -Container $container `
+            -WorkloadType AzureVM `
+            -ErrorAction SilentlyContinue
+
         foreach ($item in $items) {
 
             Write-Host "Found protected VM: $($item.FriendlyName)"
@@ -46,6 +46,8 @@ foreach ($vault in $vaults) {
                 break
             }
         }
+
+        if ($selectedVault) { break }
     }
 
     if ($selectedVault) { break }
@@ -58,7 +60,6 @@ if (-not $selectedVault) {
 Write-Host "Vault Found: $($selectedVault.Name)"
 Write-Host "Policy Found: $($policy.Name)"
 
-# Extract values
 $retentionDays = $policy.RetentionPolicy.DailyRetention.DurationCountInDays
 $backupTime = $policy.SchedulePolicy.ScheduleRunTimes[0].ToString("HH:mm")
 
@@ -70,7 +71,6 @@ $export = @{
     BackupTime    = $backupTime
 }
 
-# Save to workspace root
 $path = Join-Path $env:GITHUB_WORKSPACE "backup-config.json"
 
 $export | ConvertTo-Json -Depth 5 | Out-File $path -Force
