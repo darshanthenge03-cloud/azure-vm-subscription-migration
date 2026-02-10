@@ -15,6 +15,6 @@ $DestinationLocation       = "centralindia"
 $VMName = "ubuntu"
 
 # Recovery Vault
-$VaultName = "ubuntu-vault"
+$VaultName = "ubuntu1"
 
 # ==========================================
