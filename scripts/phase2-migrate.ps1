@@ -123,7 +123,7 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
             Write-Host "Detaching Public IP: $pipName from NIC: $($nic.Name)"
             $ipConfig.PublicIpAddress = $null
-            Set-AzNetworkInterface $nic
+            Set-AzNetworkInterface -InputObject $nic
         }
 
         $subnetId = $ipConfig.Subnet.Id
@@ -193,7 +193,7 @@ if ($publicIpToMove -and $pipInfo) {
             Where-Object { $_.Name -eq $pipInfo.IpConfigName }
 
         $targetIpConfig.PublicIpAddress = $pip
-        Set-AzNetworkInterface $nic
+        Set-AzNetworkInterface -InputObject $nic
 
         Write-Host "Public IP reattached successfully."
     }
