@@ -13,14 +13,14 @@ Write-Host "PHASE 2: FULL STACK MIGRATION"
 Write-Host "==========================================="
 
 # ---------------------------------------------------
-# Switch to Source Subscription
+# Switch to SOURCE subscription
 # ---------------------------------------------------
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 
 $vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
 
 # ---------------------------------------------------
-# STEP 1 - Disable Backup (REMOVE Recovery Points)
+# STEP 1: Disable Backup & REMOVE Recovery Points
 # ---------------------------------------------------
 Write-Host "Checking backup protection..."
 
@@ -49,10 +49,14 @@ if ($vault) {
                 -RemoveRecoveryPoints `
                 -Force
 
+            # ---------------------------------------------------
+            # WAIT LOGIC (CORRECT & AZURE-SAFE)
+            # ---------------------------------------------------
             Write-Host "Waiting for backup protection removal..."
 
-            $maxAttempts = 12
+            $maxAttempts = 20
             $attempt = 0
+            $protectionStopped = $false
 
             do {
                 Start-Sleep -Seconds 15
@@ -61,35 +65,49 @@ if ($vault) {
                 $containerCheck = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM |
                     Where-Object { $_.FriendlyName -eq $VMName }
 
-                $itemCheck = $null
                 if ($containerCheck) {
+
                     $itemCheck = Get-AzRecoveryServicesBackupItem `
                         -Container $containerCheck `
                         -WorkloadType AzureVM `
                         -ErrorAction SilentlyContinue
+
+                    if (-not $itemCheck) {
+                        $protectionStopped = $true
+                        break
+                    }
+
+                    if ($itemCheck.ProtectionState -eq "ProtectionStopped") {
+                        $protectionStopped = $true
+                        break
+                    }
+                }
+                else {
+                    $protectionStopped = $true
+                    break
                 }
 
                 Write-Host "Checking protection state... Attempt $attempt"
 
-            } while ($itemCheck -and $attempt -lt $maxAttempts)
+            } while ($attempt -lt $maxAttempts)
 
-            if ($itemCheck) {
-                throw "Backup protection still active. Aborting migration."
+            if (-not $protectionStopped) {
+                throw "Backup protection removal timed out. Aborting migration."
             }
 
-            Write-Host "Backup protection removed successfully."
+            Write-Host "Backup protection successfully removed."
         }
     }
 }
 
 # ---------------------------------------------------
-# STEP 2 - Stop VM
+# STEP 2: Stop VM
 # ---------------------------------------------------
 Write-Host "Stopping VM..."
 Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
 # ---------------------------------------------------
-# STEP 3 - Collect Resources
+# STEP 3: Collect Resources to Move
 # ---------------------------------------------------
 $resourcesToMove = @()
 $publicIpObject = $null
@@ -97,8 +115,10 @@ $publicIpObject = $null
 # VM
 $resourcesToMove += $vm.Id
 
-# Disks
+# OS Disk
 $resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
+
+# Data Disks
 foreach ($disk in $vm.StorageProfile.DataDisks) {
     if ($disk.ManagedDisk) {
         $resourcesToMove += $disk.ManagedDisk.Id
@@ -113,16 +133,16 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     foreach ($ipconfig in $nic.IpConfigurations) {
 
-        # Public IP
+        # -------- Public IP --------
         if ($ipconfig.PublicIpAddress) {
 
-            $publicIpId   = $ipconfig.PublicIpAddress.Id
-            $publicIpName = $publicIpId.Split("/")[-1]
-            $publicIpRG   = $publicIpId.Split("/")[4]
+            $pipId   = $ipconfig.PublicIpAddress.Id
+            $pipName = $pipId.Split("/")[-1]
+            $pipRG   = $pipId.Split("/")[4]
 
             $publicIpObject = Get-AzPublicIpAddress `
-                -Name $publicIpName `
-                -ResourceGroupName $publicIpRG
+                -Name $pipName `
+                -ResourceGroupName $pipRG
 
             $resourcesToMove += $publicIpObject.Id
 
@@ -131,7 +151,7 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
             Set-AzNetworkInterface -NetworkInterface $nic
         }
 
-        # VNet + Subnet
+        # -------- VNet / Subnet --------
         $subnetId = $ipconfig.Subnet.Id
         $vnetName = $subnetId.Split("/")[8]
         $vnetRG   = $subnetId.Split("/")[4]
@@ -139,7 +159,6 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
         $vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $vnetRG
         $resourcesToMove += $vnet.Id
 
-        # Route Table
         $subnetName = $subnetId.Split("/")[-1]
         $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $subnetName }
 
@@ -160,21 +179,21 @@ Write-Host "Resources to Move:"
 $resourcesToMove | ForEach-Object { Write-Host $_ }
 
 # ---------------------------------------------------
-# STEP 4 - Switch to Destination
+# STEP 4: Switch to DESTINATION subscription
 # ---------------------------------------------------
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
 if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction SilentlyContinue)) {
-    Write-Host "Creating Destination Resource Group..."
+    Write-Host "Creating destination resource group..."
     New-AzResourceGroup `
         -Name $DestinationResourceGroup `
         -Location $DestinationLocation
 }
 
 # ---------------------------------------------------
-# STEP 5 - Perform Move
+# STEP 5: Move Resources
 # ---------------------------------------------------
-Write-Host "Starting Move..."
+Write-Host "Starting resource move..."
 
 Move-AzResource `
     -ResourceId $resourcesToMove `
@@ -183,10 +202,10 @@ Move-AzResource `
     -Force `
     -ErrorAction Stop
 
-Write-Host "Move Completed Successfully."
+Write-Host "Move completed successfully."
 
 # ---------------------------------------------------
-# STEP 6 - Reattach Public IP
+# STEP 6: Reattach Public IP
 # ---------------------------------------------------
 if ($publicIpObject) {
 
@@ -198,20 +217,20 @@ if ($publicIpObject) {
         -Name $nicName `
         -ResourceGroupName $DestinationResourceGroup
 
-    $publicIp = Get-AzPublicIpAddress `
+    $pip = Get-AzPublicIpAddress `
         -Name $publicIpObject.Name `
         -ResourceGroupName $DestinationResourceGroup
 
-    $nic.IpConfigurations[0].PublicIpAddress = $publicIp
+    $nic.IpConfigurations[0].PublicIpAddress = $pip
     Set-AzNetworkInterface -NetworkInterface $nic
 }
 
 # ---------------------------------------------------
-# STEP 7 - Start VM
+# STEP 7: Start VM
 # ---------------------------------------------------
 Write-Host "Starting VM..."
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
 
 Write-Host "==========================================="
-Write-Host "MIGRATION COMPLETED SUCCESSFULLY"
+Write-Host "PHASE 2 COMPLETED SUCCESSFULLY"
 Write-Host "==========================================="
