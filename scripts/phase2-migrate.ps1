@@ -63,7 +63,7 @@ if ($vault) {
 }
 
 # ---------------------------------------------------
-# REMOVE RESTORE POINT COLLECTIONS (SUBSCRIPTION WIDE)
+# REMOVE RESTORE POINT COLLECTIONS (100% PIPELINE SAFE)
 # ---------------------------------------------------
 Write-Host "Checking entire subscription for Restore Point Collections..."
 
@@ -79,44 +79,27 @@ else {
     foreach ($rpcRes in $rpcResources) {
 
         $rpcName = $rpcRes.Name
-        $rpcRG = $rpcRes.ResourceGroupName
+        $rpcRG   = $rpcRes.ResourceGroupName
 
         Write-Host "Found Restore Point Collection: $rpcName in RG: $rpcRG"
 
-        $rpc = Get-AzRestorePointCollection `
-            -ResourceGroupName $rpcRG `
-            -Name $rpcName `
-            -ErrorAction Stop
+        # Check if belongs to our VM
+        $rpcFull = Get-AzResource -ResourceId $rpcRes.ResourceId
 
-        # Check if this RPC belongs to our VM
-        if ($rpc.Source.Id -like "*$VMName*") {
+        if ($rpcFull.Properties.source.id -like "*$VMName*") {
 
-            Write-Host "Restore Point Collection belongs to VM $VMName. Deleting..."
+            Write-Host "Restore Point Collection belongs to VM $VMName. Removing entire collection..."
 
-            $restorePoints = Get-AzRestorePoint `
-                -RestorePointCollection $rpc `
-                -ErrorAction SilentlyContinue
-
-            foreach ($rp in $restorePoints) {
-                Write-Host "Deleting Restore Point: $($rp.Name)"
-                Remove-AzRestorePoint `
-                    -RestorePointCollection $rpc `
-                    -Name $rp.Name `
-                    -Force `
-                    -ErrorAction Stop
-            }
-
-            Write-Host "Deleting Restore Point Collection: $rpcName"
-            Remove-AzRestorePointCollection `
-                -ResourceGroupName $rpcRG `
-                -Name $rpcName `
+            # Delete entire collection (auto deletes restore points)
+            Remove-AzResource `
+                -ResourceId $rpcRes.ResourceId `
                 -Force `
                 -ErrorAction Stop
         }
     }
 
-    Write-Host "Waiting 60 seconds for disk locks to release..."
-    Start-Sleep -Seconds 60
+    Write-Host "Waiting 90 seconds for Azure to release disk locks..."
+    Start-Sleep -Seconds 90
 }
 
 # ---------------------------------------------------
