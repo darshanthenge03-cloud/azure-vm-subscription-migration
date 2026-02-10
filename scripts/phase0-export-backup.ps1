@@ -22,14 +22,15 @@ $vault = Get-AzRecoveryServicesVault -Name $VaultName -ErrorAction Stop
 Set-AzRecoveryServicesVaultContext -Vault $vault
 
 # ---------------------------------------------------
-# Get Backup Container (compatible with all Az versions)
+# Get Backup Container
 # ---------------------------------------------------
 $containers = Get-AzRecoveryServicesBackupContainer `
     -ContainerType AzureVM `
     -ErrorAction SilentlyContinue
 
 if (-not $containers) {
-    throw "No backup containers found in vault '$VaultName'"
+    Write-Host "No backup containers found in vault. Skipping Phase 0."
+    return
 }
 
 $container = $containers | Where-Object {
@@ -37,7 +38,8 @@ $container = $containers | Where-Object {
 }
 
 if (-not $container) {
-    throw "Backup container not found for VM '$VMName'"
+    Write-Host "No backup container found for VM '$VMName'. Skipping Phase 0."
+    return
 }
 
 # ---------------------------------------------------
@@ -46,10 +48,24 @@ if (-not $container) {
 $backupItem = Get-AzRecoveryServicesBackupItem `
     -Container $container `
     -WorkloadType AzureVM `
-    -ErrorAction Stop
+    -ErrorAction SilentlyContinue
 
 if (-not $backupItem) {
-    throw "Backup item not found for VM '$VMName'"
+    Write-Host "No backup item found for VM '$VMName'. Skipping Phase 0."
+    return
+}
+
+# ---------------------------------------------------
+# Validate Protection State
+# ---------------------------------------------------
+if ($backupItem.ProtectionState -ne "Protected") {
+    Write-Host "Backup exists but is not active (State: $($backupItem.ProtectionState)). Skipping Phase 0."
+    return
+}
+
+if ([string]::IsNullOrEmpty($backupItem.ProtectionPolicyName)) {
+    Write-Host "Backup policy name is empty. Skipping Phase 0."
+    return
 }
 
 # ---------------------------------------------------
@@ -59,13 +75,12 @@ $policy = Get-AzRecoveryServicesBackupProtectionPolicy `
     -Name $backupItem.ProtectionPolicyName `
     -ErrorAction Stop
 
-Write-Host "Vault Found: $($vault.Name)"
+Write-Host "Vault Found : $($vault.Name)"
 Write-Host "Policy Found: $($policy.Name)"
 
 # ---------------------------------------------------
-# Export FULL policy object (Standard + Enhanced compatible)
+# Export Policy
 # ---------------------------------------------------
-
 $export = @{
     VaultName = $vault.Name
     Location  = $vault.Location
@@ -76,5 +91,5 @@ $path = Join-Path $env:GITHUB_WORKSPACE "backup-config.json"
 
 $export | ConvertTo-Json -Depth 40 | Out-File $path -Force
 
-Write-Host "Full backup configuration exported to: $path"
+Write-Host "Backup configuration exported to: $path"
 Write-Host "========== PHASE 0 COMPLETED =========="
