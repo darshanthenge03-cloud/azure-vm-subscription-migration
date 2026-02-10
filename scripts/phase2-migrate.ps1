@@ -9,7 +9,7 @@ Import-Module Az.Resources
 Import-Module Az.RecoveryServices
 
 Write-Host "==========================================="
-Write-Host "PHASE 2: MIGRATION (PIPELINE SAFE)"
+Write-Host "PHASE 2: MIGRATION (WITH PIP MOVE)"
 Write-Host "==========================================="
 
 # ---------------------------------------------------
@@ -26,81 +26,43 @@ Write-Host "Disabling backup protection..."
 $vault = Get-AzRecoveryServicesVault -Name $VaultName -ErrorAction SilentlyContinue
 
 if ($vault) {
-
     Set-AzRecoveryServicesVaultContext -Vault $vault
 
     $container = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM |
         Where-Object { $_.FriendlyName -eq $VMName }
 
     if ($container) {
-
-        $item = Get-AzRecoveryServicesBackupItem `
-            -Container $container `
-            -WorkloadType AzureVM `
-            -ErrorAction SilentlyContinue
+        $item = Get-AzRecoveryServicesBackupItem -Container $container -WorkloadType AzureVM -ErrorAction SilentlyContinue
 
         if ($item) {
-
-            Disable-AzRecoveryServicesBackupProtection `
-                -Item $item `
-                -RemoveRecoveryPoints `
-                -Force
-
-            Write-Host "Waiting for protection to stop..."
+            Disable-AzRecoveryServicesBackupProtection -Item $item -RemoveRecoveryPoints -Force
 
             do {
                 Start-Sleep 15
-                $item = Get-AzRecoveryServicesBackupItem `
-                    -Container $container `
-                    -WorkloadType AzureVM `
-                    -ErrorAction SilentlyContinue
+                $item = Get-AzRecoveryServicesBackupItem -Container $container -WorkloadType AzureVM -ErrorAction SilentlyContinue
             }
             while ($item -and $item.ProtectionState -ne "ProtectionStopped")
-
-            Write-Host "Backup protection stopped."
         }
     }
 }
 
 # ---------------------------------------------------
-# REMOVE RESTORE POINT COLLECTIONS (100% PIPELINE SAFE)
+# REMOVE RESTORE POINT COLLECTIONS (SUBSCRIPTION WIDE)
 # ---------------------------------------------------
-Write-Host "Checking entire subscription for Restore Point Collections..."
+Write-Host "Checking subscription for Restore Point Collections..."
 
-$rpcResources = Get-AzResource `
-    -ResourceType "Microsoft.Compute/restorePointCollections" `
-    -ErrorAction SilentlyContinue
+$rpcResources = Get-AzResource -ResourceType "Microsoft.Compute/restorePointCollections" -ErrorAction SilentlyContinue
 
-if (-not $rpcResources) {
-    Write-Host "No Restore Point Collections found in subscription."
-}
-else {
+foreach ($rpcRes in $rpcResources) {
 
-    foreach ($rpcRes in $rpcResources) {
+    if ($rpcRes.Properties.source.id -like "*$VMName*") {
 
-        $rpcName = $rpcRes.Name
-        $rpcRG   = $rpcRes.ResourceGroupName
-
-        Write-Host "Found Restore Point Collection: $rpcName in RG: $rpcRG"
-
-        # Check if belongs to our VM
-        $rpcFull = Get-AzResource -ResourceId $rpcRes.ResourceId
-
-        if ($rpcFull.Properties.source.id -like "*$VMName*") {
-
-            Write-Host "Restore Point Collection belongs to VM $VMName. Removing entire collection..."
-
-            # Delete entire collection (auto deletes restore points)
-            Remove-AzResource `
-                -ResourceId $rpcRes.ResourceId `
-                -Force `
-                -ErrorAction Stop
-        }
+        Write-Host "Removing Restore Point Collection: $($rpcRes.Name)"
+        Remove-AzResource -ResourceId $rpcRes.ResourceId -Force -ErrorAction Stop
     }
-
-    Write-Host "Waiting 90 seconds for Azure to release disk locks..."
-    Start-Sleep -Seconds 90
 }
+
+Start-Sleep -Seconds 90
 
 # ---------------------------------------------------
 # STOP VM
@@ -111,8 +73,6 @@ Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 # ---------------------------------------------------
 # COLLECT RESOURCES
 # ---------------------------------------------------
-Write-Host "Collecting resources to move..."
-
 $resourcesToMove = @()
 $resourcesToMove += $vm.Id
 $resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
@@ -121,9 +81,13 @@ foreach ($d in $vm.StorageProfile.DataDisks) {
     $resourcesToMove += $d.ManagedDisk.Id
 }
 
+$publicIpToMove = $null
+$nicList = @()
+
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
+    $nicList += $nic
     $resourcesToMove += $nic.Id
 
     if ($nic.NetworkSecurityGroup) {
@@ -133,13 +97,14 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
     foreach ($ip in $nic.IpConfigurations) {
 
         if ($ip.PublicIpAddress) {
+
             $pipId = $ip.PublicIpAddress.Id
             $pipName = $pipId.Split("/")[-1]
             $pipRG = $pipId.Split("/")[4]
 
-            $pipObj = Get-AzPublicIpAddress -Name $pipName -ResourceGroupName $pipRG
-            $resourcesToMove += $pipObj.Id
+            $publicIpToMove = Get-AzPublicIpAddress -Name $pipName -ResourceGroupName $pipRG
 
+            Write-Host "Detaching Public IP: $pipName"
             $ip.PublicIpAddress = $null
             Set-AzNetworkInterface $nic
         }
@@ -155,9 +120,6 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
 $resourcesToMove = $resourcesToMove | Select-Object -Unique
 
-Write-Host "Resources to move:"
-$resourcesToMove | ForEach-Object { Write-Host $_ }
-
 # ---------------------------------------------------
 # DESTINATION CONTEXT
 # ---------------------------------------------------
@@ -168,10 +130,9 @@ if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction Silen
 }
 
 # ---------------------------------------------------
-# MOVE RESOURCES
+# MOVE MAIN RESOURCES
 # ---------------------------------------------------
-Write-Host "Starting Move..."
-
+Write-Host "Moving VM and dependencies..."
 Move-AzResource `
     -ResourceId $resourcesToMove `
     -DestinationSubscriptionId $DestinationSubscriptionId `
@@ -180,7 +141,43 @@ Move-AzResource `
     -ErrorAction Stop
 
 # ---------------------------------------------------
-# START VM IN DESTINATION
+# MOVE PUBLIC IP (IF STANDARD SKU)
+# ---------------------------------------------------
+if ($publicIpToMove) {
+
+    Write-Host "Processing Public IP: $($publicIpToMove.Name)"
+
+    if ($publicIpToMove.Sku.Name -eq "Standard") {
+
+        Set-AzContext -SubscriptionId $SourceSubscriptionId
+
+        Move-AzResource `
+            -ResourceId $publicIpToMove.Id `
+            -DestinationSubscriptionId $DestinationSubscriptionId `
+            -DestinationResourceGroupName $DestinationResourceGroup `
+            -Force `
+            -ErrorAction Stop
+
+        Write-Host "Public IP moved successfully."
+
+        # Reattach
+        Set-AzContext -SubscriptionId $DestinationSubscriptionId
+
+        $nic = Get-AzNetworkInterface -Name $nicList[0].Name -ResourceGroupName $DestinationResourceGroup
+        $pip = Get-AzPublicIpAddress -Name $publicIpToMove.Name -ResourceGroupName $DestinationResourceGroup
+
+        $nic.IpConfigurations[0].PublicIpAddress = $pip
+        Set-AzNetworkInterface $nic
+
+        Write-Host "Public IP reattached."
+    }
+    else {
+        Write-Host "Public IP SKU is Basic. Cross-subscription move not supported."
+    }
+}
+
+# ---------------------------------------------------
+# START VM
 # ---------------------------------------------------
 Write-Host "Starting VM in destination..."
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
