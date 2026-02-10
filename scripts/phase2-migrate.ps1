@@ -63,52 +63,59 @@ if ($vault) {
 }
 
 # ---------------------------------------------------
-# REMOVE RESTORE POINT COLLECTIONS (CI SAFE)
+# REMOVE RESTORE POINT COLLECTIONS (SUBSCRIPTION WIDE)
 # ---------------------------------------------------
-Write-Host "Checking for Restore Point Collections..."
+Write-Host "Checking entire subscription for Restore Point Collections..."
 
 $rpcResources = Get-AzResource `
-    -ResourceGroupName $SourceResourceGroup `
     -ResourceType "Microsoft.Compute/restorePointCollections" `
     -ErrorAction SilentlyContinue
 
 if (-not $rpcResources) {
-    Write-Host "No Restore Point Collections found."
+    Write-Host "No Restore Point Collections found in subscription."
 }
 else {
 
     foreach ($rpcRes in $rpcResources) {
 
         $rpcName = $rpcRes.Name
-        Write-Host "Found Restore Point Collection: $rpcName"
+        $rpcRG = $rpcRes.ResourceGroupName
+
+        Write-Host "Found Restore Point Collection: $rpcName in RG: $rpcRG"
 
         $rpc = Get-AzRestorePointCollection `
-            -ResourceGroupName $SourceResourceGroup `
+            -ResourceGroupName $rpcRG `
             -Name $rpcName `
             -ErrorAction Stop
 
-        $restorePoints = Get-AzRestorePoint `
-            -RestorePointCollection $rpc `
-            -ErrorAction SilentlyContinue
+        # Check if this RPC belongs to our VM
+        if ($rpc.Source.Id -like "*$VMName*") {
 
-        foreach ($rp in $restorePoints) {
-            Write-Host "Deleting Restore Point: $($rp.Name)"
-            Remove-AzRestorePoint `
+            Write-Host "Restore Point Collection belongs to VM $VMName. Deleting..."
+
+            $restorePoints = Get-AzRestorePoint `
                 -RestorePointCollection $rpc `
-                -Name $rp.Name `
+                -ErrorAction SilentlyContinue
+
+            foreach ($rp in $restorePoints) {
+                Write-Host "Deleting Restore Point: $($rp.Name)"
+                Remove-AzRestorePoint `
+                    -RestorePointCollection $rpc `
+                    -Name $rp.Name `
+                    -Force `
+                    -ErrorAction Stop
+            }
+
+            Write-Host "Deleting Restore Point Collection: $rpcName"
+            Remove-AzRestorePointCollection `
+                -ResourceGroupName $rpcRG `
+                -Name $rpcName `
                 -Force `
                 -ErrorAction Stop
         }
-
-        Write-Host "Deleting Restore Point Collection: $rpcName"
-        Remove-AzRestorePointCollection `
-            -ResourceGroupName $SourceResourceGroup `
-            -Name $rpcName `
-            -Force `
-            -ErrorAction Stop
     }
 
-    Write-Host "Waiting 60 seconds for Azure to release disk locks..."
+    Write-Host "Waiting 60 seconds for disk locks to release..."
     Start-Sleep -Seconds 60
 }
 
