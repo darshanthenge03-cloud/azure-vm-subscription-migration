@@ -9,7 +9,7 @@ Import-Module Az.Resources
 Import-Module Az.RecoveryServices
 
 Write-Host "==========================================="
-Write-Host "PHASE 2: MIGRATION (WITH PIP MOVE)"
+Write-Host "PHASE 2: MIGRATION (WITH CORRECT PIP MOVE)"
 Write-Host "==========================================="
 
 # ---------------------------------------------------
@@ -32,14 +32,23 @@ if ($vault) {
         Where-Object { $_.FriendlyName -eq $VMName }
 
     if ($container) {
-        $item = Get-AzRecoveryServicesBackupItem -Container $container -WorkloadType AzureVM -ErrorAction SilentlyContinue
+        $item = Get-AzRecoveryServicesBackupItem `
+            -Container $container `
+            -WorkloadType AzureVM `
+            -ErrorAction SilentlyContinue
 
         if ($item) {
-            Disable-AzRecoveryServicesBackupProtection -Item $item -RemoveRecoveryPoints -Force
+            Disable-AzRecoveryServicesBackupProtection `
+                -Item $item `
+                -RemoveRecoveryPoints `
+                -Force
 
             do {
                 Start-Sleep 15
-                $item = Get-AzRecoveryServicesBackupItem -Container $container -WorkloadType AzureVM -ErrorAction SilentlyContinue
+                $item = Get-AzRecoveryServicesBackupItem `
+                    -Container $container `
+                    -WorkloadType AzureVM `
+                    -ErrorAction SilentlyContinue
             }
             while ($item -and $item.ProtectionState -ne "ProtectionStopped")
         }
@@ -49,15 +58,15 @@ if ($vault) {
 # ---------------------------------------------------
 # REMOVE RESTORE POINT COLLECTIONS (SUBSCRIPTION WIDE)
 # ---------------------------------------------------
-Write-Host "Checking subscription for Restore Point Collections..."
+Write-Host "Removing Restore Point Collections..."
 
-$rpcResources = Get-AzResource -ResourceType "Microsoft.Compute/restorePointCollections" -ErrorAction SilentlyContinue
+$rpcResources = Get-AzResource `
+    -ResourceType "Microsoft.Compute/restorePointCollections" `
+    -ErrorAction SilentlyContinue
 
 foreach ($rpcRes in $rpcResources) {
-
     if ($rpcRes.Properties.source.id -like "*$VMName*") {
-
-        Write-Host "Removing Restore Point Collection: $($rpcRes.Name)"
+        Write-Host "Removing RPC: $($rpcRes.Name)"
         Remove-AzResource -ResourceId $rpcRes.ResourceId -Force -ErrorAction Stop
     }
 }
@@ -71,7 +80,7 @@ Write-Host "Stopping VM..."
 Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
 # ---------------------------------------------------
-# COLLECT RESOURCES
+# COLLECT RESOURCES + DETACH PUBLIC IP
 # ---------------------------------------------------
 $resourcesToMove = @()
 $resourcesToMove += $vm.Id
@@ -82,36 +91,44 @@ foreach ($d in $vm.StorageProfile.DataDisks) {
 }
 
 $publicIpToMove = $null
-$nicList = @()
+$pipInfo = $null
 
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
     $nic = Get-AzNetworkInterface -ResourceId $nicRef.Id
-    $nicList += $nic
     $resourcesToMove += $nic.Id
 
     if ($nic.NetworkSecurityGroup) {
         $resourcesToMove += $nic.NetworkSecurityGroup.Id
     }
 
-    foreach ($ip in $nic.IpConfigurations) {
+    foreach ($ipConfig in $nic.IpConfigurations) {
 
-        if ($ip.PublicIpAddress) {
+        if ($ipConfig.PublicIpAddress) {
 
-            $pipId = $ip.PublicIpAddress.Id
+            $pipId   = $ipConfig.PublicIpAddress.Id
             $pipName = $pipId.Split("/")[-1]
-            $pipRG = $pipId.Split("/")[4]
+            $pipRG   = $pipId.Split("/")[4]
 
-            $publicIpToMove = Get-AzPublicIpAddress -Name $pipName -ResourceGroupName $pipRG
+            $publicIpToMove = Get-AzPublicIpAddress `
+                -Name $pipName `
+                -ResourceGroupName $pipRG
 
-            Write-Host "Detaching Public IP: $pipName"
-            $ip.PublicIpAddress = $null
+            # Save exact reattachment info
+            $pipInfo = @{
+                NicName      = $nic.Name
+                IpConfigName = $ipConfig.Name
+                PipName      = $pipName
+            }
+
+            Write-Host "Detaching Public IP: $pipName from NIC: $($nic.Name)"
+            $ipConfig.PublicIpAddress = $null
             Set-AzNetworkInterface $nic
         }
 
-        $subnetId = $ip.Subnet.Id
+        $subnetId = $ipConfig.Subnet.Id
         $vnetName = $subnetId.Split("/")[8]
-        $vnetRG = $subnetId.Split("/")[4]
+        $vnetRG   = $subnetId.Split("/")[4]
 
         $vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $vnetRG
         $resourcesToMove += $vnet.Id
@@ -141,14 +158,15 @@ Move-AzResource `
     -ErrorAction Stop
 
 # ---------------------------------------------------
-# MOVE PUBLIC IP (IF STANDARD SKU)
+# MOVE + REATTACH PUBLIC IP
 # ---------------------------------------------------
-if ($publicIpToMove) {
+if ($publicIpToMove -and $pipInfo) {
 
     Write-Host "Processing Public IP: $($publicIpToMove.Name)"
 
     if ($publicIpToMove.Sku.Name -eq "Standard") {
 
+        # Move PIP
         Set-AzContext -SubscriptionId $SourceSubscriptionId
 
         Move-AzResource `
@@ -163,13 +181,21 @@ if ($publicIpToMove) {
         # Reattach
         Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
-        $nic = Get-AzNetworkInterface -Name $nicList[0].Name -ResourceGroupName $DestinationResourceGroup
-        $pip = Get-AzPublicIpAddress -Name $publicIpToMove.Name -ResourceGroupName $DestinationResourceGroup
+        $nic = Get-AzNetworkInterface `
+            -Name $pipInfo.NicName `
+            -ResourceGroupName $DestinationResourceGroup
 
-        $nic.IpConfigurations[0].PublicIpAddress = $pip
+        $pip = Get-AzPublicIpAddress `
+            -Name $pipInfo.PipName `
+            -ResourceGroupName $DestinationResourceGroup
+
+        $targetIpConfig = $nic.IpConfigurations |
+            Where-Object { $_.Name -eq $pipInfo.IpConfigName }
+
+        $targetIpConfig.PublicIpAddress = $pip
         Set-AzNetworkInterface $nic
 
-        Write-Host "Public IP reattached."
+        Write-Host "Public IP reattached successfully."
     }
     else {
         Write-Host "Public IP SKU is Basic. Cross-subscription move not supported."
