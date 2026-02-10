@@ -2,30 +2,28 @@
 
 $ErrorActionPreference = "Stop"
 
-Import-Module Az.Accounts -Force
-Import-Module Az.Compute -Force
-Import-Module Az.Network -Force
-Import-Module Az.Resources -Force
-Import-Module Az.RecoveryServices -Force
+Import-Module Az.Accounts
+Import-Module Az.Compute
+Import-Module Az.Network
+Import-Module Az.Resources
+Import-Module Az.RecoveryServices
 
 Write-Host "==========================================="
-Write-Host "PHASE 2: FINAL MIGRATION WITH CLEAN BACKUP DETACH"
+Write-Host "PHASE 2: MIGRATION (AZURE-CORRECT FLOW)"
 Write-Host "==========================================="
 
 # ---------------------------------------------------
-# Switch to Source Subscription
+# Source context
 # ---------------------------------------------------
 Set-AzContext -SubscriptionId $SourceSubscriptionId
-
-$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
+$vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup
 
 # ---------------------------------------------------
-# STEP 1 - Disable Backup + Remove Recovery Points
+# Disable backup & remove recovery points (FINAL STATE)
 # ---------------------------------------------------
-Write-Host "Checking Recovery Vault..."
+Write-Host "Disabling backup protection..."
 
 $vault = Get-AzRecoveryServicesVault -Name $VaultName -ErrorAction SilentlyContinue
-
 if ($vault) {
 
     Set-AzRecoveryServicesVaultContext -Vault $vault
@@ -42,73 +40,41 @@ if ($vault) {
 
         if ($item) {
 
-            Write-Host "Disabling backup and removing recovery points..."
-
-            $job = Disable-AzRecoveryServicesBackupProtection `
+            Disable-AzRecoveryServicesBackupProtection `
                 -Item $item `
                 -RemoveRecoveryPoints `
                 -Force
 
-            # ---------------------------------------------------
-            # WAIT FOR DELETE JOB TO COMPLETE
-            # ---------------------------------------------------
-            Write-Host "Waiting for delete job to complete..."
+            Write-Host "Waiting for protection to stop..."
 
             do {
-                Start-Sleep -Seconds 15
-                $jobStatus = Get-AzRecoveryServicesBackupJob -JobId $job.JobId
-                Write-Host "Job Status: $($jobStatus.Status)"
+                Start-Sleep 15
+                $item = Get-AzRecoveryServicesBackupItem `
+                    -Container $container `
+                    -WorkloadType AzureVM `
+                    -ErrorAction SilentlyContinue
             }
-            while ($jobStatus.Status -eq "InProgress")
+            while ($item -and $item.ProtectionState -ne "ProtectionStopped")
 
-            if ($jobStatus.Status -ne "Completed") {
-                throw "Backup delete job failed."
-            }
-
-            Write-Host "Backup delete job completed."
-
-            # ---------------------------------------------------
-            # UNREGISTER BACKUP CONTAINER (CRITICAL)
-            # ---------------------------------------------------
-            Write-Host "Unregistering backup container..."
-
-            Unregister-AzRecoveryServicesBackupContainer `
-                -Container $container `
-                -Force
-
-            Start-Sleep -Seconds 20
-
-            # Verify container removal
-            $checkContainer = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVM |
-                Where-Object { $_.FriendlyName -eq $VMName }
-
-            if ($checkContainer) {
-                throw "Backup container still registered. Cannot proceed."
-            }
-
-            Write-Host "Backup container successfully removed."
+            Write-Host "Backup protection stopped."
         }
     }
 }
 
 # ---------------------------------------------------
-# STEP 2 - Stop VM
+# Stop VM
 # ---------------------------------------------------
-Write-Host "Stopping VM..."
 Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
 # ---------------------------------------------------
-# STEP 3 - Collect Resources (NO VAULT INCLUDED)
+# Collect resources
 # ---------------------------------------------------
 $resourcesToMove = @()
-
 $resourcesToMove += $vm.Id
 $resourcesToMove += $vm.StorageProfile.OsDisk.ManagedDisk.Id
 
-foreach ($disk in $vm.StorageProfile.DataDisks) {
-    if ($disk.ManagedDisk) {
-        $resourcesToMove += $disk.ManagedDisk.Id
-    }
+foreach ($d in $vm.StorageProfile.DataDisks) {
+    $resourcesToMove += $d.ManagedDisk.Id
 }
 
 foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
@@ -120,21 +86,21 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
         $resourcesToMove += $nic.NetworkSecurityGroup.Id
     }
 
-    foreach ($ipconfig in $nic.IpConfigurations) {
+    foreach ($ip in $nic.IpConfigurations) {
 
-        if ($ipconfig.PublicIpAddress) {
-            $pipId = $ipconfig.PublicIpAddress.Id
+        if ($ip.PublicIpAddress) {
+            $pipId = $ip.PublicIpAddress.Id
             $pipName = $pipId.Split("/")[-1]
             $pipRG = $pipId.Split("/")[4]
 
-            $pip = Get-AzPublicIpAddress -Name $pipName -ResourceGroupName $pipRG
-            $resourcesToMove += $pip.Id
+            $pipObj = Get-AzPublicIpAddress -Name $pipName -ResourceGroupName $pipRG
+            $resourcesToMove += $pipObj.Id
 
-            $ipconfig.PublicIpAddress = $null
-            Set-AzNetworkInterface -NetworkInterface $nic
+            $ip.PublicIpAddress = $null
+            Set-AzNetworkInterface $nic
         }
 
-        $subnetId = $ipconfig.Subnet.Id
+        $subnetId = $ip.Subnet.Id
         $vnetName = $subnetId.Split("/")[8]
         $vnetRG = $subnetId.Split("/")[4]
 
@@ -145,11 +111,11 @@ foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
 
 $resourcesToMove = $resourcesToMove | Select-Object -Unique
 
-Write-Host "Resources to Move:"
+Write-Host "Resources to move:"
 $resourcesToMove | ForEach-Object { Write-Host $_ }
 
 # ---------------------------------------------------
-# STEP 4 - Switch to Destination
+# Destination context
 # ---------------------------------------------------
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
@@ -158,42 +124,31 @@ if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction Silen
 }
 
 # ---------------------------------------------------
-# STEP 5 - Move With Full Error Output
+# Move with FULL ERROR OUTPUT
 # ---------------------------------------------------
-Write-Host "Starting Resource Move..."
+Write-Host "Starting Move..."
 
 try {
-
     Move-AzResource `
         -ResourceId $resourcesToMove `
         -DestinationSubscriptionId $DestinationSubscriptionId `
         -DestinationResourceGroupName $DestinationResourceGroup `
         -Force `
         -ErrorAction Stop
-
-    Write-Host "Move Completed Successfully."
-
 }
 catch {
-
-    Write-Host "========== FULL AZURE ERROR =========="
-
+    Write-Host "=========== AZURE MOVE ERROR ==========="
     Write-Host $_.Exception.Message
 
     if ($_.Exception.Response) {
-        $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-        $responseBody = $reader.ReadToEnd()
-        Write-Host $responseBody
+        $r = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+        Write-Host $r.ReadToEnd()
     }
-
     throw
 }
 
-# ---------------------------------------------------
-# STEP 6 - Start VM
-# ---------------------------------------------------
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
 
 Write-Host "==========================================="
-Write-Host "MIGRATION COMPLETED SUCCESSFULLY"
+Write-Host "PHASE 2 COMPLETED"
 Write-Host "==========================================="
