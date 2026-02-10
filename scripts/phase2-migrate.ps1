@@ -9,17 +9,17 @@ Import-Module Az.Resources
 Import-Module Az.RecoveryServices
 
 Write-Host "==========================================="
-Write-Host "PHASE 2: MIGRATION (AZURE-CORRECT FLOW)"
+Write-Host "PHASE 2: MIGRATION (PIPELINE SAFE)"
 Write-Host "==========================================="
 
 # ---------------------------------------------------
-# Source context
+# SOURCE CONTEXT
 # ---------------------------------------------------
 Set-AzContext -SubscriptionId $SourceSubscriptionId
 $vm = Get-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -ErrorAction Stop
 
 # ---------------------------------------------------
-# Disable Backup Protection
+# DISABLE BACKUP
 # ---------------------------------------------------
 Write-Host "Disabling backup protection..."
 
@@ -63,55 +63,63 @@ if ($vault) {
 }
 
 # ---------------------------------------------------
-# Remove Restore Point Collections (CRITICAL FIX)
+# REMOVE RESTORE POINT COLLECTIONS (CI SAFE)
 # ---------------------------------------------------
 Write-Host "Checking for Restore Point Collections..."
 
-$rpcList = Get-AzRestorePointCollection -ResourceGroupName $SourceResourceGroup -ErrorAction SilentlyContinue
+$rpcResources = Get-AzResource `
+    -ResourceGroupName $SourceResourceGroup `
+    -ResourceType "Microsoft.Compute/restorePointCollections" `
+    -ErrorAction SilentlyContinue
 
-if ($rpcList) {
+if (-not $rpcResources) {
+    Write-Host "No Restore Point Collections found."
+}
+else {
 
-    foreach ($rpc in $rpcList) {
+    foreach ($rpcRes in $rpcResources) {
 
-        Write-Host "Found Restore Point Collection: $($rpc.Name)"
-        Write-Host "Deleting Restore Points..."
+        $rpcName = $rpcRes.Name
+        Write-Host "Found Restore Point Collection: $rpcName"
 
-        $restorePoints = Get-AzRestorePoint -RestorePointCollection $rpc -ErrorAction SilentlyContinue
+        $rpc = Get-AzRestorePointCollection `
+            -ResourceGroupName $SourceResourceGroup `
+            -Name $rpcName `
+            -ErrorAction Stop
 
-        if ($restorePoints) {
-            foreach ($rp in $restorePoints) {
-                Write-Host "Deleting Restore Point: $($rp.Name)"
-                Remove-AzRestorePoint `
-                    -RestorePointCollection $rpc `
-                    -Name $rp.Name `
-                    -Force `
-                    -ErrorAction Stop
-            }
+        $restorePoints = Get-AzRestorePoint `
+            -RestorePointCollection $rpc `
+            -ErrorAction SilentlyContinue
+
+        foreach ($rp in $restorePoints) {
+            Write-Host "Deleting Restore Point: $($rp.Name)"
+            Remove-AzRestorePoint `
+                -RestorePointCollection $rpc `
+                -Name $rp.Name `
+                -Force `
+                -ErrorAction Stop
         }
 
-        Write-Host "Deleting Restore Point Collection: $($rpc.Name)"
+        Write-Host "Deleting Restore Point Collection: $rpcName"
         Remove-AzRestorePointCollection `
-            -Name $rpc.Name `
             -ResourceGroupName $SourceResourceGroup `
+            -Name $rpcName `
             -Force `
             -ErrorAction Stop
     }
 
-    Write-Host "Waiting 60 seconds for disk references to clear..."
+    Write-Host "Waiting 60 seconds for Azure to release disk locks..."
     Start-Sleep -Seconds 60
-}
-else {
-    Write-Host "No Restore Point Collections found."
 }
 
 # ---------------------------------------------------
-# Stop VM
+# STOP VM
 # ---------------------------------------------------
 Write-Host "Stopping VM..."
 Stop-AzVM -Name $VMName -ResourceGroupName $SourceResourceGroup -Force
 
 # ---------------------------------------------------
-# Collect Resources
+# COLLECT RESOURCES
 # ---------------------------------------------------
 Write-Host "Collecting resources to move..."
 
@@ -161,7 +169,7 @@ Write-Host "Resources to move:"
 $resourcesToMove | ForEach-Object { Write-Host $_ }
 
 # ---------------------------------------------------
-# Destination context
+# DESTINATION CONTEXT
 # ---------------------------------------------------
 Set-AzContext -SubscriptionId $DestinationSubscriptionId
 
@@ -170,33 +178,21 @@ if (-not (Get-AzResourceGroup -Name $DestinationResourceGroup -ErrorAction Silen
 }
 
 # ---------------------------------------------------
-# Move Resources
+# MOVE RESOURCES
 # ---------------------------------------------------
 Write-Host "Starting Move..."
 
-try {
-    Move-AzResource `
-        -ResourceId $resourcesToMove `
-        -DestinationSubscriptionId $DestinationSubscriptionId `
-        -DestinationResourceGroupName $DestinationResourceGroup `
-        -Force `
-        -ErrorAction Stop
-}
-catch {
-    Write-Host "=========== AZURE MOVE ERROR ==========="
-    Write-Host $_.Exception.Message
-
-    if ($_.Exception.Response) {
-        $r = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-        Write-Host $r.ReadToEnd()
-    }
-    throw
-}
+Move-AzResource `
+    -ResourceId $resourcesToMove `
+    -DestinationSubscriptionId $DestinationSubscriptionId `
+    -DestinationResourceGroupName $DestinationResourceGroup `
+    -Force `
+    -ErrorAction Stop
 
 # ---------------------------------------------------
-# Start VM in Destination
+# START VM IN DESTINATION
 # ---------------------------------------------------
-Write-Host "Starting VM in destination subscription..."
+Write-Host "Starting VM in destination..."
 Start-AzVM -Name $VMName -ResourceGroupName $DestinationResourceGroup
 
 Write-Host "==========================================="
